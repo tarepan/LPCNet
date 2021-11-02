@@ -152,7 +152,7 @@ void compute_gruB(const GRULayer *gru, const float* gru_b_condition, float *stat
 
 ```
 
-##### `segmv_accum8x4`
+##### `sgemv_accum8x4`
 
 ## Implementations
 ### Vector operations

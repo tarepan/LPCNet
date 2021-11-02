@@ -35,6 +35,15 @@
 #include <math.h>
 #include "arch.h"
 
+/*
+ * Architecture-optimized vector operations.
+ * Internal APIs:
+ * 
+ * - `sgemv_accum8x4`: s? General Matrix-Vector multiply accum? 8x4
+ *   - (float *out, const qweight *w, int rows, int cols, int col_stride, const float *_x) => void
+ *     - qweight: float | signed char (FP32 or Int8)
+ */
+
 /* Switch vector-operation implementation.
  * If Type A or B, impls are defined in each headers, and remainings will be passed.
  */

@@ -683,6 +683,7 @@ typedef signed char qweight;
 #  define SCALE_1 (1.f/128.f/127.f)
 
 #if 1
+/* `DOT_PROD`, so maybe Int8 ops. */
 static inline void sgemv_accum8x4(float *_out, const qweight *w, int rows, int cols, int col_stride, const float *_x)
 {
    __m256i ones;
@@ -749,7 +750,8 @@ static inline void sgemv_accum8x4(float *_out, const qweight *w, int rows, int c
       _mm256_storeu_ps(&_out[i], vout);
    }
 }
-#else
+#else /* 1 */
+/* Not used implementation */
 static inline void sgemv_accum8x4(float *out, const qweight *w, int rows, int cols, int col_stride, const float *_x)
 {
    int i, j;
