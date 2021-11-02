@@ -173,6 +173,9 @@ LPCNET_EXPORT void lpcnet_synthesize(LPCNetState *lpcnet, const float *features,
 {
     int i;
     float lpc[LPC_ORDER];
+
+    /* Run FrameRateNetwork once */
+    /* Adress of latents which are used in WaveRNN */
     float gru_a_condition[3*GRU_A_STATE_SIZE];
     float gru_b_condition[3*GRU_B_STATE_SIZE];
     run_frame_network(lpcnet, gru_a_condition, gru_b_condition, lpc, features);
@@ -182,6 +185,8 @@ LPCNET_EXPORT void lpcnet_synthesize(LPCNetState *lpcnet, const float *features,
         RNN_CLEAR(output, N);
         return;
     }
+
+   /* Loop SampleRateNetwork `N` times */
     for (i=0;i<N;i++)
     {
         int j;
@@ -189,19 +194,30 @@ LPCNET_EXPORT void lpcnet_synthesize(LPCNetState *lpcnet, const float *features,
         int exc;
         int last_sig_ulaw;
         int pred_ulaw;
+
+       /* `LPC_ORDER`-th order Linear Prediction */
         float pred = 0;
         for (j=0;j<LPC_ORDER;j++) pred -= lpcnet->last_sig[j]*lpc[j];
         last_sig_ulaw = lin2ulaw(lpcnet->last_sig[0]);
         pred_ulaw = lin2ulaw(pred);
+
+        /* Residual */
         exc = run_sample_network(&lpcnet->nnet, gru_a_condition, gru_b_condition, lpcnet->last_exc, last_sig_ulaw, pred_ulaw, lpcnet->sampling_logit_table);
+
+        /* Sum */
         pcm = pred + ulaw2lin(exc);
+
         RNN_MOVE(&lpcnet->last_sig[1], &lpcnet->last_sig[0], LPC_ORDER-1);
         lpcnet->last_sig[0] = pcm;
         lpcnet->last_exc = exc;
         pcm += PREEMPH*lpcnet->deemph_mem;
         lpcnet->deemph_mem = pcm;
+
+        /* Clip in audio range */
         if (pcm<-32767) pcm = -32767;
         if (pcm>32767) pcm = 32767;
+
+        /* Write i-th sample into output adress */
         output[i] = (int)floor(.5 + pcm);
     }
 }
