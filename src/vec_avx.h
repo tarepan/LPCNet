@@ -29,6 +29,7 @@
   AVX2/FMA implementation of vector operations, compile with -mavx2 -mfma
 */
 
+/* C Idiom: Import only once */
 #ifndef VEC_AVX_H
 #define VEC_AVX_H
 
@@ -36,13 +37,10 @@
 
 /* Use 8-bit dot products unless disabled or if stuck with SSE2. */
 #if (defined(__AVX2__) || defined(__SSSE3__)) && !defined(DISABLE_DOT_PROD)
-#define DOT_PROD
-#define USE_SU_BIAS
-
+#  define DOT_PROD
+#  define USE_SU_BIAS
 #else
-
-#warning "Only SSE and SSE2 are available. On newer machines, enable SSSE3/AVX/AVX2 using -march= to get better performance"
-
+#  warning "Only SSE and SSE2 are available. On newer machines, enable SSSE3/AVX/AVX2 using -march= to get better performance"
 #endif
 
 
@@ -51,8 +49,8 @@ static inline __m128 mm_floor_ps(__m128 x) {
   __m128 half = _mm_set1_ps(0.5);
   return _mm_cvtepi32_ps(_mm_cvtps_epi32(_mm_sub_ps(x, half)));
 }
-#undef _mm_floor_ps
-#define _mm_floor_ps(x) mm_floor_ps(x)
+#  undef _mm_floor_ps
+#  define _mm_floor_ps(x) mm_floor_ps(x)
 #endif
 
 
@@ -63,7 +61,7 @@ typedef struct {
   __m128 lo;
   __m128 hi;
 } mm256_emu;
-#define __m256 mm256_emu
+#  define __m256 mm256_emu
 
 static inline mm256_emu mm256_loadu_ps(const float *src) {
   mm256_emu ret;
@@ -71,14 +69,14 @@ static inline mm256_emu mm256_loadu_ps(const float *src) {
   ret.hi = _mm_loadu_ps(&src[4]);
   return ret;
 }
-#define _mm256_loadu_ps(src) mm256_loadu_ps(src)
+#  define _mm256_loadu_ps(src) mm256_loadu_ps(src)
 
 
 static inline void mm256_storeu_ps(float *dst, mm256_emu src) {
   _mm_storeu_ps(dst, src.lo);
   _mm_storeu_ps(&dst[4], src.hi);
 }
-#define _mm256_storeu_ps(dst, src) mm256_storeu_ps(dst, src)
+#  define _mm256_storeu_ps(dst, src) mm256_storeu_ps(dst, src)
 
 
 static inline mm256_emu mm256_setzero_ps() {
@@ -87,7 +85,7 @@ static inline mm256_emu mm256_setzero_ps() {
   ret.hi = ret.lo;
   return ret;
 }
-#define _mm256_setzero_ps mm256_setzero_ps
+#  define _mm256_setzero_ps mm256_setzero_ps
 
 static inline mm256_emu mm256_broadcast_ss(const float *x) {
   mm256_emu ret;
@@ -95,7 +93,7 @@ static inline mm256_emu mm256_broadcast_ss(const float *x) {
   ret.hi = ret.lo;
   return ret;
 }
-#define _mm256_broadcast_ss(x) mm256_broadcast_ss(x)
+#  define _mm256_broadcast_ss(x) mm256_broadcast_ss(x)
 
 static inline mm256_emu mm256_set1_ps(float x) {
   mm256_emu ret;
@@ -103,7 +101,7 @@ static inline mm256_emu mm256_set1_ps(float x) {
   ret.hi = ret.lo;
   return ret;
 }
-#define _mm256_set1_ps(x) mm256_set1_ps(x)
+#  define _mm256_set1_ps(x) mm256_set1_ps(x)
 
 
 
@@ -113,7 +111,7 @@ static inline mm256_emu mm256_mul_ps(mm256_emu a, mm256_emu b) {
   ret.hi = _mm_mul_ps(a.hi, b.hi);
   return ret;
 }
-#define _mm256_mul_ps(a,b) mm256_mul_ps(a,b)
+#  define _mm256_mul_ps(a,b) mm256_mul_ps(a,b)
 
 static inline mm256_emu mm256_add_ps(mm256_emu a, mm256_emu b) {
   mm256_emu ret;
@@ -121,7 +119,7 @@ static inline mm256_emu mm256_add_ps(mm256_emu a, mm256_emu b) {
   ret.hi = _mm_add_ps(a.hi, b.hi);
   return ret;
 }
-#define _mm256_add_ps(a,b) mm256_add_ps(a,b)
+#  define _mm256_add_ps(a,b) mm256_add_ps(a,b)
 
 
 static inline mm256_emu mm256_max_ps(mm256_emu a, mm256_emu b) {
@@ -130,7 +128,7 @@ static inline mm256_emu mm256_max_ps(mm256_emu a, mm256_emu b) {
   ret.hi = _mm_max_ps(a.hi, b.hi);
   return ret;
 }
-#define _mm256_max_ps(a,b) mm256_max_ps(a,b)
+#  define _mm256_max_ps(a,b) mm256_max_ps(a,b)
 
 static inline mm256_emu mm256_min_ps(mm256_emu a, mm256_emu b) {
   mm256_emu ret;
@@ -138,7 +136,7 @@ static inline mm256_emu mm256_min_ps(mm256_emu a, mm256_emu b) {
   ret.hi = _mm_min_ps(a.hi, b.hi);
   return ret;
 }
-#define _mm256_min_ps(a,b) mm256_min_ps(a,b)
+#  define _mm256_min_ps(a,b) mm256_min_ps(a,b)
 
 static inline mm256_emu mm256_rcp_ps(mm256_emu a) {
   mm256_emu ret;
@@ -146,22 +144,22 @@ static inline mm256_emu mm256_rcp_ps(mm256_emu a) {
   ret.hi = _mm_rcp_ps(a.hi);
   return ret;
 }
-#define _mm256_rcp_ps(a) mm256_rcp_ps(a)
+#  define _mm256_rcp_ps(a) mm256_rcp_ps(a)
 
 
 static inline __m128 mm256_extractf128_ps(mm256_emu x, int i) {
     return (i==0) ? x.lo : x.hi;
 }
-#undef _mm256_extractf128_ps
-#define _mm256_extractf128_ps(x,i) mm256_extractf128_ps(x,i)
+#  undef _mm256_extractf128_ps
+#  define _mm256_extractf128_ps(x,i) mm256_extractf128_ps(x,i)
 
 static inline mm256_emu mm256_insertf128_ps(mm256_emu dst, __m128 src, int i) {
     if (i==0) dst.lo = src;
     else dst.hi = src;
     return dst;
 }
-#undef _mm256_insertf128_ps
-#define _mm256_insertf128_ps(dst,src,i) mm256_insertf128_ps(dst,src,i)
+#  undef _mm256_insertf128_ps
+#  define _mm256_insertf128_ps(dst,src,i) mm256_insertf128_ps(dst,src,i)
 
 #endif /* __AVX__ */
 
@@ -175,7 +173,7 @@ typedef struct {
   __m128i hi;
 } mm256i_emu;
 typedef __m256i real_m256i;
-#define __m256i mm256i_emu
+#  define __m256i mm256i_emu
 
 
 static inline mm256i_emu mm256_loadu_si256(const mm256i_emu *src) {
@@ -184,14 +182,14 @@ static inline mm256i_emu mm256_loadu_si256(const mm256i_emu *src) {
   ret.hi = _mm_loadu_si128((const __m128i*)(&((const char *)src)[16]));
   return ret;
 }
-#define _mm256_loadu_si256(src) mm256_loadu_si256(src)
+#  define _mm256_loadu_si256(src) mm256_loadu_si256(src)
 
 
 static inline void mm256_storeu_si256(mm256i_emu *dst, mm256i_emu src) {
   _mm_storeu_si128((__m128i*)dst, src.lo);
   _mm_storeu_si128((__m128i*)(&((char *)dst)[16]), src.hi);
 }
-#define _mm256_storeu_si256(dst, src) mm256_storeu_si256(dst, src)
+#  define _mm256_storeu_si256(dst, src) mm256_storeu_si256(dst, src)
 
 
 static inline mm256i_emu mm256_set1_epi32(int x) {
@@ -200,7 +198,7 @@ static inline mm256i_emu mm256_set1_epi32(int x) {
   ret.hi = ret.lo;
   return ret;
 }
-#define _mm256_set1_epi32(x) mm256_set1_epi32(x)
+#  define _mm256_set1_epi32(x) mm256_set1_epi32(x)
 
 static inline mm256i_emu mm256_set1_epi16(int x) {
   mm256i_emu ret;
@@ -208,7 +206,7 @@ static inline mm256i_emu mm256_set1_epi16(int x) {
   ret.hi = ret.lo;
   return ret;
 }
-#define _mm256_set1_epi16(x) mm256_set1_epi16(x)
+#  define _mm256_set1_epi16(x) mm256_set1_epi16(x)
 
 
 static inline mm256i_emu mm256_add_epi32(mm256i_emu a, mm256i_emu b) {
@@ -217,7 +215,7 @@ static inline mm256i_emu mm256_add_epi32(mm256i_emu a, mm256i_emu b) {
   ret.hi = _mm_add_epi32(a.hi, b.hi);
   return ret;
 }
-#define _mm256_add_epi32(a,b) mm256_add_epi32(a,b)
+#  define _mm256_add_epi32(a,b) mm256_add_epi32(a,b)
 
 static inline mm256i_emu mm256_madd_epi16(mm256i_emu a, mm256i_emu b) {
   mm256i_emu ret;
@@ -225,7 +223,7 @@ static inline mm256i_emu mm256_madd_epi16(mm256i_emu a, mm256i_emu b) {
   ret.hi = _mm_madd_epi16(a.hi, b.hi);
   return ret;
 }
-#define _mm256_madd_epi16(a,b) mm256_madd_epi16(a,b)
+#  define _mm256_madd_epi16(a,b) mm256_madd_epi16(a,b)
 
 static inline mm256i_emu mm256_maddubs_epi16(mm256i_emu a, mm256i_emu b) {
   mm256i_emu ret;
@@ -233,7 +231,7 @@ static inline mm256i_emu mm256_maddubs_epi16(mm256i_emu a, mm256i_emu b) {
   ret.hi = _mm_maddubs_epi16(a.hi, b.hi);
   return ret;
 }
-#define _mm256_maddubs_epi16(a,b) mm256_maddubs_epi16(a,b)
+#  define _mm256_maddubs_epi16(a,b) mm256_maddubs_epi16(a,b)
 
 
 
@@ -251,14 +249,14 @@ static inline __m256 mm256_cvtepi32_ps(mm256i_emu a) {
   src.fake = a;
   return _mm256_cvtepi32_ps(src.real);
 }
-#define _mm256_cvtepi32_ps(a) mm256_cvtepi32_ps(a)
+#  define _mm256_cvtepi32_ps(a) mm256_cvtepi32_ps(a)
 
 static inline mm256i_emu mm256_cvtps_epi32(__m256 a) {
   mm256_union ret;
   ret.real =   _mm256_cvtps_epi32(a);
   return ret.fake;
 }
-#define _mm256_cvtps_epi32(a) mm256_cvtps_epi32(a)
+#  define _mm256_cvtps_epi32(a) mm256_cvtps_epi32(a)
 
 
 #else
@@ -269,7 +267,7 @@ static inline mm256_emu mm256_cvtepi32_ps(mm256i_emu a) {
   ret.hi = _mm_cvtepi32_ps(a.hi);
   return ret;
 }
-#define _mm256_cvtepi32_ps(a) mm256_cvtepi32_ps(a)
+#  define _mm256_cvtepi32_ps(a) mm256_cvtepi32_ps(a)
 
 static inline mm256i_emu mm256_cvtps_epi32(mm256_emu a) {
   mm256i_emu ret;
@@ -277,7 +275,7 @@ static inline mm256i_emu mm256_cvtps_epi32(mm256_emu a) {
   ret.hi = _mm_cvtps_epi32(a.hi);
   return ret;
 }
-#define _mm256_cvtps_epi32(a) mm256_cvtps_epi32(a)
+#  define _mm256_cvtps_epi32(a) mm256_cvtps_epi32(a)
 
 #endif /* __AVX__ */
 
@@ -286,8 +284,8 @@ static inline mm256i_emu mm256_cvtps_epi32(mm256_emu a) {
 
 /* In case we don't have FMA, make it a mul and an add. */
 #if !(defined(__FMA__) && defined(__AVX__))
-#define _mm256_fmadd_ps(a,b,c) _mm256_add_ps(_mm256_mul_ps(a, b), c)
-#define _mm_fmadd_ps(a,b,c) _mm_add_ps(_mm_mul_ps(a, b), c)
+#  define _mm256_fmadd_ps(a,b,c) _mm256_add_ps(_mm256_mul_ps(a, b), c)
+#  define _mm_fmadd_ps(a,b,c) _mm_add_ps(_mm_mul_ps(a, b), c)
 #endif
 
 #ifdef __AVX2__
@@ -672,17 +670,17 @@ static inline void sparse_sgemv_accum16(float *out, const float *weights, int ro
 }
 
 #ifdef DOT_PROD
-#define USE_SU_BIAS
+#  define USE_SU_BIAS
 
 typedef signed char qweight;
 
 
-#define MAX_INPUTS (2048)
-#define MAX_OUTPUTS (8192)
+#  define MAX_INPUTS (2048)
+#  define MAX_OUTPUTS (8192)
 
 
-#define SCALE (128.f*127.f)
-#define SCALE_1 (1.f/128.f/127.f)
+#  define SCALE (128.f*127.f)
+#  define SCALE_1 (1.f/128.f/127.f)
 
 #if 1
 static inline void sgemv_accum8x4(float *_out, const qweight *w, int rows, int cols, int col_stride, const float *_x)

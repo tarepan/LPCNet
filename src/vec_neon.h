@@ -31,7 +31,7 @@
 #include <arm_neon.h>
 
 #ifndef DISABLE_DOT_PROD
-#define DOT_PROD
+#  define DOT_PROD
 #endif
 typedef signed char qweight;
 
@@ -276,6 +276,7 @@ static inline void sparse_sgemv_accum16(float *out, const float *w, int rows, co
 #define MAX_INPUTS 2048
 #define MAX_OUTPUTS 8192
 
+/* Switch `vdotprod` implementation */
 #if __ARM_FEATURE_DOTPROD
 static inline int32x4_t vdotprod(int32x4_t acc, int8x16_t a, int8x16_t b) {
   return vdotq_s32(acc, a, b);
@@ -286,6 +287,7 @@ static inline int32x4_t vdotprod(int32x4_t acc, int8x16_t a, int8x16_t b)
   return vpadalq_s16(acc, vpaddq_s16(vmull_s8(vget_low_s8(a), vget_low_s8(b)),  vmull_high_s8(a, b)));
 }
 #endif
+/**/
 
 static inline void sgemv_accum8x4(float *_out, const qweight *w, int rows, int cols, int col_stride, const float *_x)
 {

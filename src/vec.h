@@ -26,6 +26,7 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
+/* C Idiom: Import only once */
 #ifndef VEC_H
 #define VEC_H
 
@@ -34,27 +35,31 @@
 #include <math.h>
 #include "arch.h"
 
+/* Switch vector-operation implementation.
+ * If Type A or B, impls are defined in each headers, and remainings will be passed.
+ */
 
+/* Type A: x86 SIMD */
 #if defined(__AVX__) || defined(__SSE2__)
-#include "vec_avx.h"
+#  include "vec_avx.h"
+/* Type B: ARM SIMD */
 #elif defined(__ARM_NEON__) || defined(__ARM_NEON)
-#include "vec_neon.h"
+#  include "vec_neon.h"
+/* Type C: NO SIMD */
 #else
+#  define MAX_INPUTS (2048)
+#  define NO_OPTIMIZATIONS
 
-#define MAX_INPUTS (2048)
-
-#define NO_OPTIMIZATIONS
-
-#ifndef DISABLE_DOT_PROD
-#define DOT_PROD
+#  ifndef DISABLE_DOT_PROD
+#     define DOT_PROD
 //#define USE_SU_BIAS
-#endif
+#  endif
 
-#ifdef DOT_PROD
+#  ifdef DOT_PROD
 typedef signed char qweight;
-#else
+#  else
 typedef float qweight;
-#endif
+#  endif
 
 
 /* No AVX2/FMA support */
