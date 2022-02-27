@@ -29,12 +29,14 @@
 #define _NNET_H_
 
 #include "vec.h"
+#include "kiss99.h"
 
 #define ACTIVATION_LINEAR  0
 #define ACTIVATION_SIGMOID 1
 #define ACTIVATION_TANH    2
 #define ACTIVATION_RELU    3
 #define ACTIVATION_SOFTMAX 4
+#define ACTIVATION_SWISH   5
 
 typedef struct {
   const float *bias;
@@ -94,11 +96,11 @@ typedef struct {
 
 void compute_activation(float *output, const float *input, int N, int activation);
 
-void compute_dense(const DenseLayer *layer, float *output, const float *input);
+void _lpcnet_compute_dense(const DenseLayer *layer, float *output, const float *input);
 
 void compute_mdense(const MDenseLayer *layer, float *output, const float *input);
 
-int sample_mdense(const MDenseLayer *layer,  const float *input, const float *sampling_logit_table);
+int sample_mdense(const MDenseLayer *layer,  const float *input, const float *sampling_logit_table, kiss99_ctx *rng);
 
 void compute_gru(const GRULayer *gru, float *state, const float *input);
 

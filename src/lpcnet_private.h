@@ -6,7 +6,7 @@
 #include "freq.h"
 #include "lpcnet.h"
 #include "nnet_data.h"
-#include "celt_lpc.h"
+#include "kiss99.h"
 
 #define BITS_PER_CHAR 8
 
@@ -31,8 +31,12 @@ struct LPCNetState {
     float old_lpc[FEATURES_DELAY][LPC_ORDER];
 #endif
     float sampling_logit_table[256];
+    float gru_a_condition[3*GRU_A_STATE_SIZE];
+    float gru_b_condition[3*GRU_B_STATE_SIZE];
     int frame_count;
     float deemph_mem;
+    float lpc[LPC_ORDER];
+    kiss99_ctx rng;
 };
 
 struct LPCNetDecState {
@@ -61,6 +65,16 @@ struct LPCNetEncState{
   int exc_mem;
 };
 
+#define PLC_BUF_SIZE (FEATURES_DELAY*FRAME_SIZE + TRAINING_OFFSET)
+struct LPCNetPLCState {
+  LPCNetState lpcnet;
+  LPCNetEncState enc;
+  short pcm[PLC_BUF_SIZE+FRAME_SIZE];
+  int pcm_fill;
+  int skip_analysis;
+  int blend;
+  float features[NB_TOTAL_FEATURES];
+};
 
 extern float ceps_codebook1[];
 extern float ceps_codebook2[];
@@ -76,6 +90,13 @@ void process_superframe(LPCNetEncState *st, unsigned char *buf, FILE *ffeat, int
 void compute_frame_features(LPCNetEncState *st, const float *in);
 
 void decode_packet(float features[4][NB_TOTAL_FEATURES], float *vq_mem, const unsigned char buf[8]);
+
+void run_frame_network(LPCNetState *lpcnet, float *gru_a_condition, float *gru_b_condition, float *lpc, const float *features);
+void lpcnet_synthesize_tail_impl(LPCNetState *lpcnet, short *output, int N, int preload);
+void lpcnet_synthesize_impl(LPCNetState *lpcnet, const float *features, short *output, int N, int preload);
+void lpcnet_synthesize_blend_impl(LPCNetState *lpcnet, const short *pcm_in, short *output, int N);
+void process_single_frame(LPCNetEncState *st, FILE *ffeat);
+int lpcnet_compute_single_frame_features(LPCNetEncState *st, const short *pcm, float features[NB_TOTAL_FEATURES]);
 
 void process_single_frame(LPCNetEncState *st, FILE *ffeat);
 

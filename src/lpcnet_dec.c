@@ -37,7 +37,6 @@
 #include "freq.h"
 #include "pitch.h"
 #include "arch.h"
-#include "celt_lpc.h"
 #include <assert.h>
 #include "lpcnet_private.h"
 #include "lpcnet.h"
@@ -92,7 +91,7 @@ void decode_packet(float features[4][NB_TOTAL_FEATURES], float *vq_mem, const un
   int sub;
   int voiced = 1;
   float frame_corr;
-  ;
+  float sign;
   unpacker bits;
   
   bits_unpacker_init(&bits, buf, 8);
@@ -105,7 +104,7 @@ void decode_packet(float features[4][NB_TOTAL_FEATURES], float *vq_mem, const un
   vq_end[2] = bits_unpack(&bits, 10);
   vq_mid = bits_unpack(&bits, 13);
   interp_id = bits_unpack(&bits, 3);
-  //fprintf(stdout, "%d %d %d %d %d %d %d %d %d\n", c0_id, main_pitch, modulation, corr_id, vq_end[0], vq_end[1], vq_end[2], vq_mid, interp_id);
+  /*fprintf(stdout, "%d %d %d %d %d %d %d %d %d\n", c0_id, main_pitch, modulation, corr_id, vq_end[0], vq_end[1], vq_end[2], vq_mid, interp_id);*/
 
   
   for (i=0;i<4;i++) RNN_CLEAR(&features[i][0], NB_TOTAL_FEATURES);
@@ -133,7 +132,7 @@ void decode_packet(float features[4][NB_TOTAL_FEATURES], float *vq_mem, const un
     features[3][i+1] = ceps_codebook1[vq_end[0]*NB_BANDS_1 + i] + ceps_codebook2[vq_end[1]*NB_BANDS_1 + i] + ceps_codebook3[vq_end[2]*NB_BANDS_1 + i];
   }
 
-  float sign = 1;
+  sign = 1;
   if (vq_mid >= 4096) {
     vq_mid -= 4096;
     sign = -1;

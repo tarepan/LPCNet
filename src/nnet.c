@@ -46,6 +46,17 @@
 
 #define SOFTMAX_HACK
 
+#define MAX_ACTIVATIONS (4096)
+
+static OPUS_INLINE void vec_swish(float *y, const float *x, int N)
+{
+   int i;
+   float tmp[MAX_ACTIVATIONS];
+   celt_assert(N <= MAX_ACTIVATIONS);
+   vec_sigmoid(tmp, x, N);
+   for (i=0;i<N;i++)
+      y[i] = x[i]*tmp[i];
+}
 
 static OPUS_INLINE float relu(float x)
 {
@@ -75,6 +86,8 @@ void compute_activation(float *output, const float *input, int N, int activation
       vec_sigmoid(output, input, N);
    } else if (activation == ACTIVATION_TANH) {
       vec_tanh(output, input, N);
+   } else if (activation == ACTIVATION_SWISH) {
+      vec_swish(output, input, N);
    } else if (activation == ACTIVATION_RELU) {
       for (i=0;i<N;i++)
          output[i] = relu(input[i]);
@@ -100,7 +113,7 @@ void compute_activation(float *output, const float *input, int N, int activation
    }
 }
 
-void compute_dense(const DenseLayer *layer, float *output, const float *input)
+void _lpcnet_compute_dense(const DenseLayer *layer, float *output, const float *input)
 {
    int i;
    int N, M;
@@ -141,9 +154,11 @@ void compute_mdense(const MDenseLayer *layer, float *output, const float *input)
    compute_activation(output, output, N, layer->activation);
 }
 
-int sample_mdense(const MDenseLayer *layer, const float *input, const float *sampling_logit_table)
+int sample_mdense(const MDenseLayer *layer, const float *input, const float *sampling_logit_table, kiss99_ctx *rng)
 {
    int b, j, N, M, C, stride;
+   int val=0;
+   float thresholds[8];
    M = layer->nb_inputs;
    N = layer->nb_neurons;
    C = layer->nb_channels;
@@ -151,12 +166,16 @@ int sample_mdense(const MDenseLayer *layer, const float *input, const float *sam
    stride = M*C;
    
    celt_assert(N <= DUAL_FC_OUT_SIZE);
-   int val=0;
-   float thresholds[8];
 
    /* Computing all the random thresholds in advance. These thresholds are directly
       based on the logit to avoid computing the sigmoid.*/
-   for (b=0;b<8;b++) thresholds[b] = sampling_logit_table[rand()&0xFF];
+   for (b=0;b<8;b+=4) {
+       uint32_t r = kiss99_rand(rng);
+       thresholds[b] = sampling_logit_table[r&0xFF];
+       thresholds[b+1] = sampling_logit_table[(r>>8)&0xFF];
+       thresholds[b+2] = sampling_logit_table[(r>>16)&0xFF];
+       thresholds[b+3] = sampling_logit_table[(r>>24)&0xFF];
+   }
 
    for (b=0;b<8;b++)
    {
@@ -175,7 +194,7 @@ int sample_mdense(const MDenseLayer *layer, const float *input, const float *sam
       sum1 = layer->factor[i]*tanh_approx(sum1);
       sum2 = layer->factor[N + i]*tanh_approx(sum2);
       sum1 += sum2;
-      //sum1 = 1.f/(1 + exp(-sum1));
+      /*sum1 = 1.f/(1 + exp(-sum1));*/
 #if 1 /* Sample the decision based on the logit. */
       bit = thresholds[b] < sum1;
 #else

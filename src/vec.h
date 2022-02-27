@@ -59,9 +59,13 @@
 #  define MAX_INPUTS (2048)
 #  define NO_OPTIMIZATIONS
 
+#  define MAX_INPUTS (2048)
+
+#  define NO_OPTIMIZATIONS
+
 #  ifndef DISABLE_DOT_PROD
-#     define DOT_PROD
-//#define USE_SU_BIAS
+#    define DOT_PROD
+/*#define USE_SU_BIAS*/
 #  endif
 
 #  ifdef DOT_PROD
