@@ -1,6 +1,7 @@
 #!/bin/sh
 set -e
 
+# `$1`: commit hash value
 model=lpcnet_data-$1.tar.gz
 
 if [ ! -f $model ]; then

@@ -1,12 +1,12 @@
 # LPCNet
 
-Low complexity implementation of the WaveRNN-based LPCNet algorithm, as described in:
+Low complexity implementation of the LPCNet algorithm, as described in:
 
 - J.-M. Valin, J. Skoglund, [LPCNet: Improving Neural Speech Synthesis Through Linear Prediction](https://jmvalin.ca/papers/lpcnet_icassp2019.pdf), *Proc. International Conference on Acoustics, Speech and Signal Processing (ICASSP)*, arXiv:1810.11846, 2019.
 - J.-M. Valin, J. Skoglund, [A Real-Time Wideband Neural Vocoder at 1.6 kb/s Using LPCNet](https://jmvalin.ca/papers/lpcnet_codec.pdf), *Proc. INTERSPEECH*, arxiv:1903.12087, 2019.
 - J. Skoglund, J.-M. Valin, [Improving Opus Low Bit Rate Quality with Neural Speech Synthesis](https://jmvalin.ca/papers/opusnet.pdf), *Proc. INTERSPEECH*, arxiv:1905.04628, 2020.
 
-# Introduction
+## Introduction
 
 Work in progress software for researching low CPU complexity algorithms for speech synthesis and compression by applying Linear Prediction techniques to WaveRNN. High quality speech can be synthesised on regular CPUs (around 3 GFLOP) with SIMD support (SSE2, SSSE3, AVX, AVX2/FMA, NEON currently supported). The code also supports very low bitrate compression at 1.6 kb/s.
 
@@ -14,54 +14,74 @@ The BSD licensed software is written in C and Python/Keras. For training, a GTX 
 
 This software is an open source starting point for LPCNet/WaveRNN-based speech synthesis and coding.
 
-# Using the existing software
+## Inference
+### Setup
+Following commands build inference program written by C for x86/64 and ARM CPU.  
 
-You can build the code using:
-
-```
-./autogen.sh
-./configure
-make
-```
-Note that the autogen.sh script is used when building from Git and will automatically download the latest model
-(models are too large to put in Git). By default, LPCNet will attempt to use 8-bit dot product instructions on AVX\*/Neon to
-speed up inference. To disable that (e.g. to avoid quantization effects when retraining), add --disable-dot-product to the
-configure script. LPCNet does not yet have a complete implementation for some of the integer operations on the ARMv7
-architecture so for now you will also need --disable-dot-product to successfully compile on 32-bit ARM.
-
-It is highly recommended to set the CFLAGS environment variable to enable AVX or NEON *prior* to running configure, otherwise
-no vectorization will take place and the code will be very slow. On a recent x86 CPU, something like
+#### Step 1 - Env
+Set variables for vectorization.  
+By default, the program attempt to use 8-bit dot product instructions on AVX\*/Neon.  
+##### x86
 ```
 export CFLAGS='-Ofast -g -march=native'
 ```
-should work. On ARM, you can enable Neon with:
+##### ARM
 ```
 export CFLAGS='-Ofast -g -mfpu=neon'
 ```
-While not strictly required, the -Ofast flag will help with auto-vectorization, especially for dot products that
-cannot be optimized without -ffast-math (which -Ofast enables). Additionally, -falign-loops=32 has been shown to
-help on x86.
+While not strictly required, the -Ofast flag will help with auto-vectorization, especially for dot products that cannot be optimized without -ffast-math (which -Ofast enables).  
+Additionally, -falign-loops=32 has been shown to help on x86.  
 
-You can test the capabilities of LPCNet using the lpcnet\_demo application. To encode a file:
+#### Step 2 - Build
 ```
+./autogen.sh    # Latest model download & `autoreconf`
+./configure     # Run the generated configure script
+make
+```
+Note that the autogen.sh script is used when building from Git  
+
+##### Options
+- `configure`
+  - `--disable-dot-product`: Disable usage of 8-bit dot product instructions
+
+use case: avoid quantization effects when retraining  
+
+##### Restriction
+ARMv7: Needs `--disable-dot-product` because of not yet complete implementation  
+
+### Demo
+You can test the capabilities of LPCNet using the lpcnet\_demo application.  
+The same functionality is available in the form of a library. See include/lpcnet.h for the API.  
+
+#### Speech Compression
+Speech encoding & decoding.  
+
+```
+# Encode `input.pcm` (16bit/16kHz PCM, machine endian)
+#   to `compressed.bin` (8 bytes per 40-ms packet, raw, no header)
 ./lpcnet_demo -encode input.pcm compressed.bin
-```
-where input.pcm is a 16-bit (machine endian) PCM file sampled at 16 kHz. The raw compressed data (no header)
-is written to compressed.bin and consists of 8 bytes per 40-ms packet.
 
-To decode:
-```
+# Decode `compressed.bin` to `output.pcm` (16bit/16kHz PCM)
 ./lpcnet_demo -decode compressed.bin output.pcm
 ```
-where output.pcm is also 16-bit, 16 kHz PCM.
 
-Alternatively, you can run the uncompressed analysis/synthesis using -features
-instead of -encode and -synthesis instead of -decode.
-The same functionality is available in the form of a library. See include/lpcnet.h for the API.
+#### Speech Synthesis
+Uncompressed analysis/synthesis.  
 
-# Training a new model
+```
+# (maybe) Feature-rize
+./lpcnet_demo -features  input.pcm uncompressed.bin
 
-This codebase is also meant for research and it is possible to train new models. These are the steps to do that:
+# Synthesis
+./lpcnet_demo -synthesis uncompressed.bin output.pcm
+```
+
+## Training
+
+This codebase is also meant for research and it is possible to train new models.  
+
+### Steps
+These are the steps to do that:
 
 1. Set up a Keras system with GPU.
 
@@ -92,11 +112,11 @@ This codebase is also meant for research and it is possible to train new models.
    and move the generated nnet\_data.\* files to the src/ directory.
    Then you just need to rebuild the software and use lpcnet\_demo as explained above.
 
-# Speech Material for Training 
+### Dataset
 
 Suitable training material can be obtained from [Open Speech and Language Resources](https://www.openslr.org/).  See the datasets.txt file for details on suitable training data.
 
-# Reading Further
+## Reading Further
 
 1. [LPCNet: DSP-Boosted Neural Speech Synthesis](https://people.xiph.org/~jm/demo/lpcnet/)
 1. [A Real-Time Wideband Neural Vocoder at 1.6 kb/s Using LPCNet](https://people.xiph.org/~jm/demo/lpcnet_codec/)
