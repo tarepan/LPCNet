@@ -47,20 +47,32 @@ embed_size = 128
 pcm_levels = 2**pcm_bits
 
 def interleave(p, samples):
+    """
+    (Local function)
+    """
     p2=tf.expand_dims(p, 3)
     nb_repeats = pcm_levels//(2*p.shape[2])
     p3 = tf.reshape(tf.repeat(tf.concat([1-p2, p2], 3), nb_repeats), (-1, samples, pcm_levels))
     return p3
 
 def tree_to_pdf(p, samples):
+    """
+    (Local function)
+    """
     return interleave(p[:,:,1:2], samples) * interleave(p[:,:,2:4], samples) * interleave(p[:,:,4:8], samples) * interleave(p[:,:,8:16], samples) \
          * interleave(p[:,:,16:32], samples) * interleave(p[:,:,32:64], samples) * interleave(p[:,:,64:128], samples) * interleave(p[:,:,128:256], samples)
 
 def tree_to_pdf_train(p):
+    """
+    (Local function)
+    """
     #FIXME: try not to hardcode the 2400 samples (15 frames * 160 samples/frame)
     return tree_to_pdf(p, 2400)
 
 def tree_to_pdf_infer(p):
+    """
+    (Local function)
+    """
     return tree_to_pdf(p, 1)
 
 def quant_regularizer(x):
@@ -188,6 +200,9 @@ class SparsifyGRUB(Callback):
             
 
 class PCMInit(Initializer):
+    """
+    (Local class)
+    """
     def __init__(self, gain=.1, seed=None):
         self.gain = gain
         self.seed = seed
@@ -214,6 +229,7 @@ class PCMInit(Initializer):
 
 class WeightClip(Constraint):
     '''Clips the weights incident to each hidden unit to be inside a range
+    (Local class)
     '''
     def __init__(self, c=2):
         self.c = c
@@ -228,9 +244,26 @@ class WeightClip(Constraint):
         return {'name': self.__class__.__name__,
             'c': self.c}
 
-constraint = WeightClip(0.992)
 
-def new_lpcnet_model(rnn_units1=384, rnn_units2=16, nb_used_features=20, batch_size=128, training=False, adaptation=False, quantize=False, flag_e2e = False, cond_size=128, lpc_order=16):
+def new_lpcnet_model(
+    rnn_units1=384,
+    rnn_units2=16,
+    nb_used_features=20,
+    batch_size=128,
+    training=False,
+    adaptation=False,
+    quantize=False,
+    flag_e2e = False,
+    cond_size=128,
+    lpc_order=16
+):
+    """
+    Construct the `lpcnet` model.
+
+    Frame Rate Network: feat & pitch => f
+    """
+    # Keras functional API based
+
     pcm = Input(shape=(None, 1), batch_size=batch_size)
     dpcm = Input(shape=(None, 3), batch_size=batch_size)
     feat = Input(shape=(None, nb_used_features), batch_size=batch_size)
@@ -239,24 +272,25 @@ def new_lpcnet_model(rnn_units1=384, rnn_units2=16, nb_used_features=20, batch_s
     dec_state1 = Input(shape=(rnn_units1,))
     dec_state2 = Input(shape=(rnn_units2,))
 
-    padding = 'valid' if training else 'same'
-    fconv1 = Conv1D(cond_size, 3, padding=padding, activation='tanh', name='feature_conv1')
-    fconv2 = Conv1D(cond_size, 3, padding=padding, activation='tanh', name='feature_conv2')
+    # (`pitch`) -> Embed `pembed` --|
+    # (`feat`) -----------------(cat_feat)
     pembed = Embedding(256, 64, name='embed_pitch')
     cat_feat = Concatenate()([feat, Reshape((-1, 64))(pembed(pitch))])
 
-    cfeat = fconv2(fconv1(cat_feat))
-
+    # (cat_feat) -> Conv `fconv1` -> Conv `fconv2` -> FC `fdense1` -> FC `fdense2` -> (`cfeat`)
+    padding = 'valid' if training else 'same'
+    fconv1 = Conv1D(cond_size, 3, padding=padding, activation='tanh', name='feature_conv1')
+    fconv2 = Conv1D(cond_size, 3, padding=padding, activation='tanh', name='feature_conv2')
     fdense1 = Dense(cond_size, activation='tanh', name='feature_dense1')
     fdense2 = Dense(cond_size, activation='tanh', name='feature_dense2')
+    cfeat = fconv2(fconv1(cat_feat))
+    cfeat = fdense2(fdense1(cfeat))
 
     if flag_e2e and quantize:
         fconv1.trainable = False
         fconv2.trainable = False
         fdense1.trainable = False
         fdense2.trainable = False
-
-    cfeat = fdense2(fdense1(cfeat))
 
     error_calc = Lambda(lambda x: tf_l2u(x[0] - tf.roll(x[1],1,axis = 1)))
     if flag_e2e:
@@ -266,6 +300,10 @@ def new_lpcnet_model(rnn_units1=384, rnn_units2=16, nb_used_features=20, batch_s
     tensor_preds = diff_pred(name = "lpc2preds")([pcm,lpcoeffs])
     past_errors = error_calc([pcm,tensor_preds])
     embed = diff_Embed(name='embed_sig',initializer = PCMInit())
+
+    # past_errors --------------------|
+    # tensor_preds -> μLaw `tf_l2u` --|
+    # `pcm` -> μLaw `tf_l2u` -----------> GaussianNoise -> diff_Embed `embed` -> Reshape => `cpcm`
     cpcm = Concatenate()([tf_l2u(pcm),tf_l2u(tensor_preds),past_errors])
     cpcm = GaussianNoise(.3)(cpcm)
     cpcm = Reshape((-1, embed_size*3))(embed(cpcm))
@@ -274,21 +312,36 @@ def new_lpcnet_model(rnn_units1=384, rnn_units2=16, nb_used_features=20, batch_s
     
     rep = Lambda(lambda x: K.repeat_elements(x, frame_size, 1))
 
+    # Definition of GRU_A & GRU_B
     quant = quant_regularizer if quantize else None
-
+    constraint = WeightClip(0.992)
     if training:
+        # [CuDNNGRU](https://www.tensorflow.org/api_docs/python/tf/compat/v1/keras/layers/CuDNNGRU)
+        # gru_a: (B, T, F_i) => (B, T, F_o), (B, T, F_h)
+        #   state is preserved between batches.
+        #   weight clipping and `quant` is applied on recurrent_kernel.
         rnn = CuDNNGRU(rnn_units1, return_sequences=True, return_state=True, name='gru_a', stateful=True,
               recurrent_constraint = constraint, recurrent_regularizer=quant)
+        # gru_b: (B, T, F_i) => (B, T, F_o), (B, T, F_h)
+        #   state is preserved between batches.
+        #   weight clipping and `quant` is applied on both recurrent_kernel and kernel.
         rnn2 = CuDNNGRU(rnn_units2, return_sequences=True, return_state=True, name='gru_b', stateful=True,
                kernel_constraint=constraint, recurrent_constraint = constraint, kernel_regularizer=quant, recurrent_regularizer=quant)
     else:
-        rnn = GRU(rnn_units1, return_sequences=True, return_state=True, recurrent_activation="sigmoid", reset_after='true', name='gru_a', stateful=True,
-              recurrent_constraint = constraint, recurrent_regularizer=quant)
-        rnn2 = GRU(rnn_units2, return_sequences=True, return_state=True, recurrent_activation="sigmoid", reset_after='true', name='gru_b', stateful=True,
-               kernel_constraint=constraint, recurrent_constraint = constraint, kernel_regularizer=quant, recurrent_regularizer=quant)
+        # [GRU](https://www.tensorflow.org/api_docs/python/tf/compat/v1/keras/layers/GRU)
+        # `reset_after` & `recurrent_activation` are for GPU/CUDA compatibility.
+        rnn = GRU(rnn_units1, return_sequences=True, return_state=True, name='gru_a', stateful=True,
+              recurrent_constraint = constraint, recurrent_regularizer=quant,
+              recurrent_activation="sigmoid", reset_after='true')
+        rnn2 = GRU(rnn_units2, return_sequences=True, return_state=True, name='gru_b', stateful=True,
+              kernel_constraint=constraint, recurrent_constraint = constraint, kernel_regularizer=quant, recurrent_regularizer=quant,
+              recurrent_activation="sigmoid", reset_after='true')
 
     rnn_in = Concatenate()([cpcm, rep(cfeat)])
     md = MDense(pcm_levels, activation='sigmoid', name='dual_fc')
+    # rep(cfeat)------------------------------|
+    #            |                            | 
+    # cpcm -------> `rnn` -> `GaussianNoise` --> `rnn2` -> `md` -> Lambda(tree_to_pdf_train)
     gru_out1, _ = rnn(rnn_in)
     gru_out1 = GaussianNoise(.005)(gru_out1)
     gru_out2, _ = rnn2(Concatenate()([gru_out1, rep(cfeat)]))
@@ -301,15 +354,20 @@ def new_lpcnet_model(rnn_units1=384, rnn_units2=16, nb_used_features=20, batch_s
         embed.Trainable=False
     
     m_out = Concatenate(name='pdf')([tensor_preds,ulaw_prob])
+
+    # The whole model
     if not flag_e2e:
         model = Model([pcm, feat, pitch, lpcoeffs], m_out)
     else:
         model = Model([pcm, feat, pitch], [m_out, cfeat])
+
+    # Register parameters
     model.rnn_units1 = rnn_units1
     model.rnn_units2 = rnn_units2
     model.nb_used_features = nb_used_features
     model.frame_size = frame_size
-    
+
+    # Sub models (encoder & decoder)
     if not flag_e2e:
         encoder = Model([feat, pitch], cfeat)
         dec_rnn_in = Concatenate()([cpcm_decoder, dec_feat])
@@ -319,9 +377,9 @@ def new_lpcnet_model(rnn_units1=384, rnn_units2=16, nb_used_features=20, batch_s
     dec_gru_out1, state1 = rnn(dec_rnn_in, initial_state=dec_state1)
     dec_gru_out2, state2 = rnn2(Concatenate()([dec_gru_out1, dec_feat]), initial_state=dec_state2)
     dec_ulaw_prob = Lambda(tree_to_pdf_infer)(md(dec_gru_out2))
-
     if flag_e2e:
         decoder = Model([dpcm, dec_feat, dec_state1, dec_state2], [dec_ulaw_prob, state1, state2])
     else:
         decoder = Model([dpcm, dec_feat, dec_state1, dec_state2], [dec_ulaw_prob, state1, state2])
+
     return model, encoder, decoder

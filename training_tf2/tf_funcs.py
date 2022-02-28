@@ -12,6 +12,7 @@ import tensorflow as tf
 scale = 255.0/32768.0
 scale_1 = 32768.0/255.0
 def tf_l2u(x):
+    """Linear to μ-law with TensorFlow functions"""
     s = K.sign(x)
     x = K.abs(x)
     u = (s*(128*K.log(1+scale*x)/K.log(256.0)))
@@ -19,6 +20,7 @@ def tf_l2u(x):
     return u
 
 def tf_u2l(u):
+    """μ-law to linear with TensorFlow functions"""
     u = tf.cast(u,"float32")
     u = u - 128.0
     s = K.sign(u)

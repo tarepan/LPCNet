@@ -72,6 +72,7 @@ elif args.grub_density is not None:
 
 gamma = 2.0 if args.gamma is None else args.gamma
 
+# Model (default: `lpcnet`)
 import importlib
 lpcnet = importlib.import_module(args.model)
 
@@ -92,8 +93,6 @@ from lossfuncs import *
 #    tf.config.experimental.set_virtual_device_configuration(gpus[0], [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=5120)])
 #  except RuntimeError as e:
 #    print(e)
-
-nb_epochs = args.epochs
 
 # Try reducing batch_size if you run out of memory on your GPU
 batch_size = args.batch_size
@@ -131,6 +130,7 @@ with strategy.scope():
         model.compile(optimizer=opt, loss=metric_cel, metrics=metric_cel)
     else:
         model.compile(optimizer=opt, loss = [interp_mulaw(gamma=gamma), loss_matchlar()], loss_weights = [1.0, 2.0], metrics={'pdf':[metric_cel,metric_icel,metric_exc_sd,metric_oginterploss]})
+    # Report model architecture
     model.summary()
 
 feature_file = args.features
@@ -196,4 +196,5 @@ if args.logdir is not None:
     tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=logdir)
     callbacks.append(tensorboard_callback)
 
-model.fit(loader, epochs=nb_epochs, validation_split=0.0, callbacks=callbacks)
+# Run training
+model.fit(loader, epochs=args.epochs, validation_split=0.0, callbacks=callbacks)
