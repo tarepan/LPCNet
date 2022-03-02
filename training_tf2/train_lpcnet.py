@@ -169,32 +169,40 @@ periods = (.1 + 50*features[:,:,nb_used_features-2:nb_used_features-1]+100).asty
 # dump models to disk as we go
 checkpoint = ModelCheckpoint('{}_{}_{}.h5'.format(args.output, args.grua_size, '{epoch:02d}'))
 
-if args.retrain is not None:
-    model.load_weights(args.retrain)
-
+# Model state
 if quantize or retrain:
-    #Adapting from an existing model
+    # Adapting from an existing model
     model.load_weights(input_model)
-    if quantize:
-        sparsify = lpcnet.Sparsify(10000, 30000, 100, density, quantize=True)
-        grub_sparsify = lpcnet.SparsifyGRUB(10000, 30000, 100, args.grua_size, grub_density, quantize=True)
-    else:
-        sparsify = lpcnet.Sparsify(0, 0, 1, density)
-        grub_sparsify = lpcnet.SparsifyGRUB(0, 0, 1, args.grua_size, grub_density)
 else:
-    #Training from scratch
-    sparsify = lpcnet.Sparsify(2000, 40000, 400, density)
-    grub_sparsify = lpcnet.SparsifyGRUB(2000, 40000, 400, args.grua_size, grub_density)
+    # Training from scratch
+    pass
+
+# Sparsification and Quantization callbacks
+if quantize:
+    # Full-scale sparsification from step#0 & Gradual quantization from step#10000
+    #                                 t_start, t_end, interval,grua_units, density,      quantize
+    sparsify = lpcnet.Sparsify(         10000, 30000, 100,                 density,      quantize=True)
+    grub_sparsify = lpcnet.SparsifyGRUB(10000, 30000, 100, args.grua_size, grub_density, quantize=True)
+elif retrain:
+    # Full-scale sparsification from step#0 (no quantization)
+    sparsify = lpcnet.Sparsify(             0,     0,   1,                 density)
+    grub_sparsify = lpcnet.SparsifyGRUB(    0,     0,   1, args.grua_size, grub_density)
+else:
+    # Gradual sparsification from step#2000 (no quantization)
+    sparsify = lpcnet.Sparsify(          2000, 40000, 400,                 density)
+    grub_sparsify = lpcnet.SparsifyGRUB( 2000, 40000, 400, args.grua_size, grub_density)
 
 model.save_weights('{}_{}_initial.h5'.format(args.output, args.grua_size))
 
 loader = LPCNetLoader(data, features, periods, batch_size, e2e=flag_e2e)
 
 callbacks = [checkpoint, sparsify, grub_sparsify]
-if args.logdir is not None:
-    logdir = '{}/{}_{}_logs'.format(args.logdir, args.output, args.grua_size)
-    tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=logdir)
-    callbacks.append(tensorboard_callback)
 
-# Run training
+# TensorBoard logging
+if args.logdir is not None:
+    callbacks.append(tf.keras.callbacks.TensorBoard(
+        log_dir=f'{args.logdir}/{args.output}_{args.grua_size}_logs'
+    ))
+
+# Run training (always start from epoch#0 (`initial_epoch` is not used))
 model.fit(loader, epochs=args.epochs, validation_split=0.0, callbacks=callbacks)

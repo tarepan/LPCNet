@@ -82,8 +82,17 @@ def quant_regularizer(x):
     return .01 * tf.reduce_mean(K.sqrt(K.sqrt(1.0001 - tf.math.cos(2*3.1415926535897931*(Q*x-tf.round(Q*x))))))
 
 class Sparsify(Callback):
-    def __init__(self, t_start, t_end, interval, density, quantize=False):
+    def __init__(self, t_start, t_end, interval, density, quantize:bool=False):
+        """
+        Args:
+            t_start: The global step at which weight processing gradually start
+            t_end:   The global step from which weight processing is full-scale
+            interval: Weight processing interval
+            density: Sparsification density parameter
+            quantize: Whether to quantize, which also affects spasification schedule
+        """
         super(Sparsify, self).__init__()
+        # Number of global step (processed batches)
         self.batch = 0
         self.t_start = t_start
         self.t_end = t_end
@@ -92,10 +101,20 @@ class Sparsify(Callback):
         self.quantize = quantize
 
     def on_batch_end(self, batch, logs=None):
-        #print("batch number", self.batch)
         self.batch += 1
+
+        # ## Shedules
+        # Sparsification
+        #               0 ----------- t_start ----------------------------- t_end ---------------------
+        # [non-quant]      <nothing>           <once per interval, gradual>        <every steps, full>
+        # [quant]         <                          every steps, full                               >
+
+        # Quantization
+        #               0 ----------- t_start ----------------------------- t_end ---------------------
+        # [quant]          <nothing>           <once per interval, gradual>        <every steps, full>
+
+        #    quantize_mode OR (global_step > t_start AND every `interval` steps) OR (global_step > t_end)
         if self.quantize or (self.batch > self.t_start and (self.batch-self.t_start) % self.interval == 0) or self.batch >= self.t_end:
-            #print("constrain");
             layer = self.model.get_layer('gru_a')
             w = layer.get_weights()
             p = w[1]
@@ -104,11 +123,15 @@ class Sparsify(Callback):
             #print("nb = ", nb, ", N = ", N);
             #print(p.shape)
             #print ("density = ", density)
+
+            # Sparsification
             for k in range(nb):
                 density = self.final_density[k]
+                # Density attenuation until t_end (quantize_mode is always full sparsification)
                 if self.batch < self.t_end and not self.quantize:
                     r = 1 - (self.batch-self.t_start)/(self.t_end - self.t_start)
                     density = 1 - (1-self.final_density[k])*(1 - r*r*r)
+                # /Density update
                 A = p[:, k*N:(k+1)*N]
                 A = A - np.diag(np.diag(A))
                 #This is needed because of the CuDNNGRU strange weight ordering
@@ -126,7 +149,11 @@ class Sparsify(Callback):
                 mask = np.transpose(mask, (1, 0))
                 p[:, k*N:(k+1)*N] = p[:, k*N:(k+1)*N]*mask
                 #print(thresh, np.mean(mask))
+            # /Sparsification
+
+            #  quantize_mode AND ((global_step > t_start AND every `interval` steps) OR global_step > t_end)
             if self.quantize and ((self.batch > self.t_start and (self.batch-self.t_start) % self.interval == 0) or self.batch >= self.t_end):
+                # Threshold update until t_end
                 if self.batch < self.t_end:
                     threshold = .5*(self.batch - self.t_start)/(self.t_end - self.t_start)
                 else:
