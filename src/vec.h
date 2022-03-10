@@ -39,9 +39,8 @@
  * Architecture-optimized vector operations.
  * Internal APIs:
  * 
- * - `sgemv_accum8x4`: s? General Matrix-Vector multiply accum? 8x4
- *   - (float *out, const qweight *w, int rows, int cols, int col_stride, const float *_x) => void
- *     - qweight: float | signed char (FP32 or Int8)
+ * - `sgemv_accum8x4`: SGEMV based on 8x4 tiles
+ * - `sparse_sgemv_accum8x4`: SBSMV (FP32 Block Sparse MV) based on 8x4 tiles
  */
 
 /* Switch vector-operation implementation.
@@ -215,79 +214,127 @@ static inline void sparse_sgemv_accum16(float *out, const float *w, int rows, co
 
 #ifdef DOT_PROD
 
-#define SCALE (128.f*127.f)
-#define SCALE_1 (1.f/128.f/127.f)
+#   define SCALE (128.f*127.f)
+#   define SCALE_1 (1.f/128.f/127.f)
 
 
-#ifdef USE_SU_BIAS
+#   ifdef USE_SU_BIAS
 
+/**
+ * SGEMV by 8line-4elem QGEMV tiles (int8 non-vectorized)
+ *
+ * Args:
+ *    out - Output vector containing initial accumulator value (e.g. bias)
+ *    w - Quantized weight matrix
+ *    rows - The number of rows    in the weight matrix `w`
+ *    cols - The number of columns in the weight matrix `w`
+ *    col_stride - Not used
+ *    _x - Input vector
+ **/
 static inline void sgemv_accum8x4(float *out, const qweight *w, int rows, int cols, int col_stride, const float *_x)
 {
    int i, j;
    unsigned char x[MAX_INPUTS];
    (void)col_stride;
+   // Output scaling for int8 accumulation
    for (i=0;i<rows;i++) out[i] *= SCALE;
+   // Input u8-quantization - _x::fp32 => x::u8 (flooring/add127 + scaling/mul127)
    for (i=0;i<cols;i++) x[i] = 127+(int)floor(.5+127*_x[i]);
+
+   // Loop row-wise computations (8 rows per loop)
    for (i=0;i<rows;i+=8)
    {
+      // Loop tile accumulation until the end of the rows (4 columns per loop)
       for (j=0;j<cols;j+=4)
       {
+         /* 8line-4elem QGEMV tile: O[i:i+8] <- W[i:i+8, j:j+4] @ X[j:j+4] */
          float * restrict y;
          float xj0, xj1, xj2, xj3;
          xj0 = x[j+0];
          xj1 = x[j+1];
          xj2 = x[j+2];
          xj3 = x[j+3];
+         // Same accumulator between tiles of same rows
          y = &out[i];
-         y[0] += (w[0]*xj0+w[1]*xj1+w[2]*xj2+w[3]*xj3);
-         y[1] += (w[4]*xj0+w[5]*xj1+w[6]*xj2+w[7]*xj3);
-         y[2] += (w[8]*xj0+w[9]*xj1+w[10]*xj2+w[11]*xj3);
+         // QGEMV
+         y[0] += (w[ 0]*xj0+w[ 1]*xj1+w[ 2]*xj2+w[ 3]*xj3);
+         y[1] += (w[ 4]*xj0+w[ 5]*xj1+w[ 6]*xj2+w[ 7]*xj3);
+         y[2] += (w[ 8]*xj0+w[ 9]*xj1+w[10]*xj2+w[11]*xj3);
          y[3] += (w[12]*xj0+w[13]*xj1+w[14]*xj2+w[15]*xj3);
          y[4] += (w[16]*xj0+w[17]*xj1+w[18]*xj2+w[19]*xj3);
          y[5] += (w[20]*xj0+w[21]*xj1+w[22]*xj2+w[23]*xj3);
          y[6] += (w[24]*xj0+w[25]*xj1+w[26]*xj2+w[27]*xj3);
          y[7] += (w[28]*xj0+w[29]*xj1+w[30]*xj2+w[31]*xj3);
+         // Next weights
          w += 32;
       }
    }
+
+   // Output re-scaling
    for (i=0;i<rows;i++) out[i] *= SCALE_1;
 }
 
+/**
+ * SSBMV by 8line-4elem QGEMV tiles (int8 non-vectorized)
+ *
+ * Args:
+ *    out - Output vector containing initial accumulator value (e.g. bias)
+ *    w - Quantized weight sparse matrix, containing only non-zero blocks
+ *    rows - The number of rows    in the weight matrix `w`
+ *    cols - The number of columns in the weight matrix `w`
+ *    idx - Non-zero block index
+ *    _x - Input vector
+ **/
 static inline void sparse_sgemv_accum8x4(float *out, const qweight *w, int rows, int cols, const int *idx, const float *_x)
 {
    int i, j;
    unsigned char x[MAX_INPUTS];
+   // Output scaling for int8 accumulation
    for (i=0;i<rows;i++) out[i] *= SCALE;
+   // Input u8-quantization - _x::fp32 => x::u8 (flooring/add127 + scaling/mul127)
    for (i=0;i<cols;i++) x[i] = 127+floor(.5+127*_x[i]);
+
+   // Loop row-wise computations (8 rows per loop)
    for (i=0;i<rows;i+=8)
    {
+      // Loop tile accumulation until the end of the rows (1 dense block, which contain 4 columns, per loop)
       int colblocks;
       colblocks = *idx++;
+      // `j` is just a counter
       for (j=0;j<colblocks;j++)
       {
+         /* 8line-4elem QGEMV tile: O[i:i+8] <- W[i:i+8, pos:pos+4] @ X[pos:pos+4] */
          int pos;
          float * restrict y;
          int xj0, xj1, xj2, xj3;
+         // Head index/position of Next non-zero block through pointer
          pos = (*idx++);
+         // 4 consecutive input elements from non-zero head position
          xj0 = x[pos+0];
          xj1 = x[pos+1];
          xj2 = x[pos+2];
          xj3 = x[pos+3];
+         // Same accumulator between tiles of same rows
          y = &out[i];
-         y[0] += (w[0]*xj0+w[1]*xj1+w[2]*xj2+w[3]*xj3);
-         y[1] += (w[4]*xj0+w[5]*xj1+w[6]*xj2+w[7]*xj3);
-         y[2] += (w[8]*xj0+w[9]*xj1+w[10]*xj2+w[11]*xj3);
+         // QGEMV
+         y[0] += (w[ 0]*xj0+w[ 1]*xj1+w[ 2]*xj2+w[ 3]*xj3);
+         y[1] += (w[ 4]*xj0+w[ 5]*xj1+w[ 6]*xj2+w[ 7]*xj3);
+         y[2] += (w[ 8]*xj0+w[ 9]*xj1+w[10]*xj2+w[11]*xj3);
          y[3] += (w[12]*xj0+w[13]*xj1+w[14]*xj2+w[15]*xj3);
          y[4] += (w[16]*xj0+w[17]*xj1+w[18]*xj2+w[19]*xj3);
          y[5] += (w[20]*xj0+w[21]*xj1+w[22]*xj2+w[23]*xj3);
          y[6] += (w[24]*xj0+w[25]*xj1+w[26]*xj2+w[27]*xj3);
          y[7] += (w[28]*xj0+w[29]*xj1+w[30]*xj2+w[31]*xj3);
+         // Next weights
          w += 32;
       }
    }
+
+   // Output re-scaling
    for (i=0;i<rows;i++) out[i] *= SCALE_1;
 }
-#else /*USE_SU_BIAS*/
+
+#   else /*USE_SU_BIAS*/
 
 static inline void sgemv_accum8x4(float *out, const qweight *w, int rows, int cols, int col_stride, const float *_x)
 {
@@ -307,9 +354,9 @@ static inline void sgemv_accum8x4(float *out, const qweight *w, int rows, int co
          xj2 = x[j+2];
          xj3 = x[j+3];
          y = &out[i];
-         y[0] += (w[0]*xj0+w[1]*xj1+w[2]*xj2+w[3]*xj3);
-         y[1] += (w[4]*xj0+w[5]*xj1+w[6]*xj2+w[7]*xj3);
-         y[2] += (w[8]*xj0+w[9]*xj1+w[10]*xj2+w[11]*xj3);
+         y[0] += (w[ 0]*xj0+w[ 1]*xj1+w[ 2]*xj2+w[ 3]*xj3);
+         y[1] += (w[ 4]*xj0+w[ 5]*xj1+w[ 6]*xj2+w[ 7]*xj3);
+         y[2] += (w[ 8]*xj0+w[ 9]*xj1+w[10]*xj2+w[11]*xj3);
          y[3] += (w[12]*xj0+w[13]*xj1+w[14]*xj2+w[15]*xj3);
          y[4] += (w[16]*xj0+w[17]*xj1+w[18]*xj2+w[19]*xj3);
          y[5] += (w[20]*xj0+w[21]*xj1+w[22]*xj2+w[23]*xj3);
@@ -342,9 +389,9 @@ static inline void sparse_sgemv_accum8x4(float *out, const qweight *w, int rows,
          xj2 = x[pos+2];
          xj3 = x[pos+3];
          y = &out[i];
-         y[0] += (w[0]*xj0+w[1]*xj1+w[2]*xj2+w[3]*xj3);
-         y[1] += (w[4]*xj0+w[5]*xj1+w[6]*xj2+w[7]*xj3);
-         y[2] += (w[8]*xj0+w[9]*xj1+w[10]*xj2+w[11]*xj3);
+         y[0] += (w[ 0]*xj0+w[ 1]*xj1+w[ 2]*xj2+w[ 3]*xj3);
+         y[1] += (w[ 4]*xj0+w[ 5]*xj1+w[ 6]*xj2+w[ 7]*xj3);
+         y[2] += (w[ 8]*xj0+w[ 9]*xj1+w[10]*xj2+w[11]*xj3);
          y[3] += (w[12]*xj0+w[13]*xj1+w[14]*xj2+w[15]*xj3);
          y[4] += (w[16]*xj0+w[17]*xj1+w[18]*xj2+w[19]*xj3);
          y[5] += (w[20]*xj0+w[21]*xj1+w[22]*xj2+w[23]*xj3);
@@ -355,50 +402,68 @@ static inline void sparse_sgemv_accum8x4(float *out, const qweight *w, int rows,
    }
    for (i=0;i<rows;i++) out[i] *= SCALE_1;
 }
-#endif /*USE_SU_BIAS*/
+#   endif /*USE_SU_BIAS*/
 
 #else /*DOT_PROD*/
 
 #define sgemv_accum8x4 sgemv_accum
 
 
+/**
+ * SSBMV by 8line-4elem SGEMV tiles (fp32 non-vectorized)
+ *
+ * Args:
+ *    out - Output vector containing initial accumulator value (e.g. bias)
+ *    w - Weight sparse matrix, containing only non-zero blocks
+ *    rows - The number of rows    in the weight matrix `w`
+ *    cols - The number of columns in the weight matrix `w`
+ *    idx - Non-zero block index
+ *    x - Input vector
+ **/
 static inline void sparse_sgemv_accum8x4(float *out, const qweight *w, int rows, int ignore, const int *idx, const float *x)
 {
    int i, j;
    (void)ignore;
+   // Loop row-wise computations (8 rows per loop)
    for (i=0;i<rows;i+=8)
    {
+      // Loop tile accumulation until the end of the rows (1 dense block, which contain 4 columns, per loop)
       int cols;
       cols = *idx++;
       for (j=0;j<cols;j++)
       {
+         /* 8line-4elem SGEMV tile: O[i:i+8] <- W[i:i+8, pos:pos+4] @ X[pos:pos+4] */
          int pos;
          float * restrict y;
          float xj0, xj1, xj2, xj3;
+         // Head index/position of Next non-zero block through pointer
          pos = (*idx++);
+         // 4 consecutive input elements from non-zero head position
          xj0 = x[pos+0];
          xj1 = x[pos+1];
          xj2 = x[pos+2];
          xj3 = x[pos+3];
+         // Same accumulator between tiles of same rows
          y = &out[i];
-         y[0] += w[0]*xj0;
-         y[1] += w[1]*xj0;
-         y[2] += w[2]*xj0;
-         y[3] += w[3]*xj0;
-         y[4] += w[4]*xj0;
-         y[5] += w[5]*xj0;
-         y[6] += w[6]*xj0;
-         y[7] += w[7]*xj0;
-
-         y[0] += w[8]*xj1;
-         y[1] += w[9]*xj1;
+         // SGEMV8x1 column_pos_0
+         y[0] += w[ 0]*xj0;
+         y[1] += w[ 1]*xj0;
+         y[2] += w[ 2]*xj0;
+         y[3] += w[ 3]*xj0;
+         y[4] += w[ 4]*xj0;
+         y[5] += w[ 5]*xj0;
+         y[6] += w[ 6]*xj0;
+         y[7] += w[ 7]*xj0;
+         // SGEMV8x1 column_pos_1
+         y[0] += w[ 8]*xj1;
+         y[1] += w[ 9]*xj1;
          y[2] += w[10]*xj1;
          y[3] += w[11]*xj1;
          y[4] += w[12]*xj1;
          y[5] += w[13]*xj1;
          y[6] += w[14]*xj1;
          y[7] += w[15]*xj1;
-
+         // SGEMV8x1 column_pos_2
          y[0] += w[16]*xj2;
          y[1] += w[17]*xj2;
          y[2] += w[18]*xj2;
@@ -407,7 +472,7 @@ static inline void sparse_sgemv_accum8x4(float *out, const qweight *w, int rows,
          y[5] += w[21]*xj2;
          y[6] += w[22]*xj2;
          y[7] += w[23]*xj2;
-
+         // SGEMV8x1 column_pos_3
          y[0] += w[24]*xj3;
          y[1] += w[25]*xj3;
          y[2] += w[26]*xj3;
@@ -416,6 +481,7 @@ static inline void sparse_sgemv_accum8x4(float *out, const qweight *w, int rows,
          y[5] += w[29]*xj3;
          y[6] += w[30]*xj3;
          y[7] += w[31]*xj3;
+         // Next weights
          w += 32;
       }
    }

@@ -311,17 +311,31 @@ static inline __m256 exp8_approx(__m256 X)
    return Y;
 }
 
+/**
+ * Convert packed fp32 [-1, 1) to packed u8 [0, 256).
+ *
+ * Args:
+ *    x - Output u8 vector
+ *    _x - Input fp32 vector
+ *    len - The number of elements in the input vector
+ **/
 static inline void vector_ps_to_epi8(unsigned char *x, const float *_x, int len) {
     int i;
    __m256 const127 = _mm256_set1_ps(127.f);
     for (i=0;i<len;i+=8) {
        __m256 xf;
        __m256i xi;
+       // Load eight fp32 values on a 256 register as a pack vector
        xf = _mm256_loadu_ps(&_x[i]);
+       // xf::vec[fp32] = 127*X + 127.
        xf = _mm256_fmadd_ps(xf, const127, const127);
+       // xi::vec[int32] = 127*X + 127
        xi = _mm256_cvtps_epi32(xf);
+       // xi::vec[int16] = [...(127*X[0:4] + 127), 0,0,0,0, ...(127*X[4:8] + 127), 0,0,0,0]
        xi = _mm256_packus_epi32(xi,  _mm256_setzero_si256());
+       // xi::vec[int16] = permuted 4 blocks
        xi = _mm256_permute4x64_epi64(xi, 0xD8);
+       // xi::vec[int16] = packed by zeros
        xi = _mm256_packus_epi16(xi, _mm256_setzero_si256());
        xi = _mm256_permutevar8x32_epi32(xi, _mm256_setr_epi32(0,1, 0,0, 0,0, 0,0));
        _mm256_storeu_si256 ((__m256i *)&x[i], xi);
@@ -364,6 +378,14 @@ static inline __m256 exp8_approx(__m256 X)
    return Y;
 }
 
+/**
+ * Convert packed fp32 [-1, 1) to packed u8 [0, 256).
+ *
+ * Args:
+ *    x - Output u8 vector
+ *    _x - Input fp32 vector
+ *    len - The number of elements in the input vector
+ **/
 static inline void vector_ps_to_epi8(unsigned char *x, const float *_x, int len) {
     int i;
     for (i=0;i<len;i++) x[i] = 127+floor(.5+127*_x[i]);
@@ -666,61 +688,96 @@ static inline void sparse_sgemv_accum16(float *out, const float *weights, int ro
    }
 }
 
+
+/*
+==================================================================================
+Define "matrix-vector product" (*MV) operations.
+The functions are `sgemv_accum8x4` and `sparse_sgemv_accum8x4`.
+*/
+
 #ifdef DOT_PROD
+      /*
+      ==============================================================================
+      Quantized (int8)
+      */
 #  define USE_SU_BIAS
-
 typedef signed char qweight;
-
-
 #  define MAX_INPUTS (2048)
 #  define MAX_OUTPUTS (8192)
-
-
 #  define SCALE (128.f*127.f)
 #  define SCALE_1 (1.f/128.f/127.f)
 
-/* QGEMV (`DOT_PROD`, so maybe Int8 ops) */
+/**
+ * SGEMV by 8line-4elem QGEMV tiles (int8 pseudo-VNNI)
+ *
+ * Args:
+ *    _out - Output vector containing initial accumulator value (e.g. bias)
+ *    w - Quantized weight matrix
+ *    rows - The number of rows    in the weight matrix `w`
+ *    cols - The number of columns in the weight matrix `w`
+ *    col_stride - Not used
+ *    _x - Input vector
+ **/
 static inline void sgemv_accum8x4(float *_out, const qweight *w, int rows, int cols, int col_stride, const float *_x)
 {
+   /* all-one vector for VPMADDWD */
    __m256i ones;
    int i, j;
    unsigned char x[MAX_INPUTS];
    (void)col_stride;
    ones = _mm256_set1_epi16(1);
-   /*for (i=0;i<cols;i++) x[i] = 127+floor(.5+127*_x[i]);*/
+
+   /* Activation's Static Quantization, [-1, 1) => [0, 256) */
    vector_ps_to_epi8(x, _x, cols);
+
+   // Loop row-wise computations (8 rows per loop)
    for (i=0;i<rows;i+=8)
    {
+      /* vy0::vec[int32] - accumulation vector, initialized with quantized output vector */
       __m256i vy0;
+      /* vout::vec[fp32] - accumulation vector, initialized with raw output vector */
       __m256 vout;
       vout = _mm256_loadu_ps(&_out[i]);
+      // Static Quantization
       vout = _mm256_mul_ps(vout, _mm256_set1_ps(SCALE));
+      // Same accumulator between tiles of same rows
       vy0 = _mm256_cvtps_epi32(vout);
       j=0;
-#if 1 /* Unrolling by 4 gives some gain, comment out if it does not. */
+      // Loop tile accumulation until unroll-limited end of the rows (4 columns * 4 unroll per loop)
       for (;j<cols-12;j+=16)
       {
          __m256i tmp;
          __m256i vxj;
          __m256i vw;
+
+         /* 8line-4elem QGEMV tile: O[i:i+8] <- W[i:i+8, j:j+4] @ X[j:j+4] */
+         // Broadcast an u32 block which contains four u8 elements == x[j:j+4]
          vxj = _mm256_set1_epi32(*(int*)&x[j]);
          vw = _mm256_loadu_si256((const __m256i *)w);
+         // QGEMV
          tmp = _mm256_maddubs_epi16(vxj, vw);
          tmp = _mm256_madd_epi16(tmp, ones);
          vy0 = _mm256_add_epi32(vy0, tmp);
+         // Next weights
          w += 32;
+
+         // #2
          vxj = _mm256_set1_epi32(*(int*)&x[j+4]);
          vw = _mm256_loadu_si256((const __m256i *)w);
          tmp = _mm256_maddubs_epi16(vxj, vw);
          tmp = _mm256_madd_epi16(tmp, ones);
          vy0 = _mm256_add_epi32(vy0, tmp);
          w += 32;
+
+         // #3
          vxj = _mm256_set1_epi32(*(int*)&x[j+8]);
          vw = _mm256_loadu_si256((const __m256i *)w);
          tmp = _mm256_maddubs_epi16(vxj, vw);
          tmp = _mm256_madd_epi16(tmp, ones);
          vy0 = _mm256_add_epi32(vy0, tmp);
          w += 32;
+
+         // #4
          vxj = _mm256_set1_epi32(*(int*)&x[j+12]);
          vw = _mm256_loadu_si256((const __m256i *)w);
          tmp = _mm256_maddubs_epi16(vxj, vw);
@@ -728,7 +785,7 @@ static inline void sgemv_accum8x4(float *_out, const qweight *w, int rows, int c
          vy0 = _mm256_add_epi32(vy0, tmp);
          w += 32;
       }
-#endif
+      // Tile accumulation until the end (un-unroll-able tail)
       for (;j<cols;j+=4)
       {
          __m256i tmp;
@@ -741,55 +798,83 @@ static inline void sgemv_accum8x4(float *_out, const qweight *w, int rows, int c
          vy0 = _mm256_add_epi32(vy0, tmp);
          w += 32;
       }
+
+      /* Write back rescaled fp32 results */
       vout = _mm256_cvtepi32_ps(vy0);
       vout = _mm256_mul_ps(vout, _mm256_set1_ps(SCALE_1));
       _mm256_storeu_ps(&_out[i], vout);
    }
 }
 
-/* QSpMV */
+/**
+ * SSBMV by 8line-4elem QGEMV tiles (int8 pseudo-VNNI)
+ *
+ * Args:
+ *    _out - Output vector containing initial accumulator value (e.g. bias)
+ *    w - Quantized weight sparse matrix, containing only non-zero blocks
+ *    rows - The number of rows    in the weight matrix `w`
+ *    cols - The number of columns in the weight matrix `w`
+ *    idx - Non-zero block index
+ *    _x - Input vector
+ **/
 static inline void sparse_sgemv_accum8x4(float *_out, const qweight *w, int rows, int cols, const int *idx, const float *_x)
 {
+   /* all-one vector for VPMADDWD */
    __m256i ones;
    int i, j;
    unsigned char x[MAX_INPUTS];
    ones = _mm256_set1_epi16(1);
-   /*for (i=0;i<cols;i++) x[i] = 127+floor(.5+127*_x[i]);*/
+
+   /* Activation's Static Quantization, [-1, 1) => [0, 256) */
    vector_ps_to_epi8(x, _x, cols);
+
+   // Loop row-wise computations (8 rows per loop)
    for (i=0;i<rows;i+=8)
    {
       int colblocks;
+      /* vy0::vec[int32] - accumulation vector, initialized with contents of the output vector */
       __m256i vy0;
       __m256 vout;
       colblocks = *idx++;
       vout = _mm256_loadu_ps(&_out[i]);
       vout = _mm256_mul_ps(vout, _mm256_set1_ps(SCALE));
+      // Same accumulator between tiles of same rows
       vy0 = _mm256_cvtps_epi32(vout);
       j=0;
-#if 1 /* Unrolling by 4 gives some gain, comment out if it does not. */
+      // Loop tile accumulation until unroll-limited end of the rows (1 dense block, which contain 4 columns, * 4 unroll per loop)
       for (;j<colblocks-3;j+=4)
       {
          __m256i tmp;
          __m256i vxj;
          __m256i vw;
+
+         /* 8line-4elem QGEMV tile: O[i:i+8] <- W[i:i+8, pos:pos+4] @ X[pos:pos+4] */
+         vxj = _mm256_set1_epi32(*(int*)&x[*idx++]);
+         vw = _mm256_loadu_si256((const __m256i *)w);
+         // QGEMV
+         tmp = _mm256_maddubs_epi16(vxj, vw);
+         tmp = _mm256_madd_epi16(tmp, ones);
+         vy0 = _mm256_add_epi32(vy0, tmp);
+         // Next weights
+         w += 32;
+
+         // #2
          vxj = _mm256_set1_epi32(*(int*)&x[*idx++]);
          vw = _mm256_loadu_si256((const __m256i *)w);
          tmp = _mm256_maddubs_epi16(vxj, vw);
          tmp = _mm256_madd_epi16(tmp, ones);
          vy0 = _mm256_add_epi32(vy0, tmp);
          w += 32;
+
+         // #3
          vxj = _mm256_set1_epi32(*(int*)&x[*idx++]);
          vw = _mm256_loadu_si256((const __m256i *)w);
          tmp = _mm256_maddubs_epi16(vxj, vw);
          tmp = _mm256_madd_epi16(tmp, ones);
          vy0 = _mm256_add_epi32(vy0, tmp);
          w += 32;
-         vxj = _mm256_set1_epi32(*(int*)&x[*idx++]);
-         vw = _mm256_loadu_si256((const __m256i *)w);
-         tmp = _mm256_maddubs_epi16(vxj, vw);
-         tmp = _mm256_madd_epi16(tmp, ones);
-         vy0 = _mm256_add_epi32(vy0, tmp);
-         w += 32;
+
+         // #4
          vxj = _mm256_set1_epi32(*(int*)&x[*idx++]);
          vw = _mm256_loadu_si256((const __m256i *)w);
          tmp = _mm256_maddubs_epi16(vxj, vw);
@@ -797,7 +882,7 @@ static inline void sparse_sgemv_accum8x4(float *_out, const qweight *w, int rows
          vy0 = _mm256_add_epi32(vy0, tmp);
          w += 32;
       }
-#endif
+      // Tile accumulation until the end (un-unroll-able tail)
       for (;j<colblocks;j++)
       {
          __m256i tmp;
@@ -812,17 +897,39 @@ static inline void sparse_sgemv_accum8x4(float *_out, const qweight *w, int rows
          vy0 = _mm256_add_epi32(vy0, tmp);
          w += 32;
       }
+
+      /* Write back rescaled fp32 results */
       vout = _mm256_cvtepi32_ps(vy0);
       vout = _mm256_mul_ps(vout, _mm256_set1_ps(SCALE_1));
       _mm256_storeu_ps(&_out[i], vout);
    }
 }
+      /*
+      /Quantized (int8)
+      ==============================================================================
+      */
 
-
-#else /*DOT_PROD*/
+#else /*not `ifdef DOT_PROD`*/
+      /*
+      ==============================================================================
+      Single precision (fp32)
+      */
 typedef float qweight;
+
+/* SGEMV */
 #define sgemv_accum8x4 sgemv_accum
 
+/**
+ * SSBMV by 8line-4elem SGEMV tiles (fp32 FMA)
+ *
+ * Args:
+ *    out - Output vector containing initial accumulator value (e.g. bias)
+ *    weights - Weight sparse matrix, containing only non-zero blocks
+ *    rows - The number of rows    in the weight matrix `w`
+ *    ignore - Not used
+ *    idx - Non-zero block index
+ *    x - Input vector
+ **/
 static inline void sparse_sgemv_accum8x4(float *out, const qweight *weights, int rows, int ignore, const int *idx, const float *x)
 {
    int i, j;
@@ -843,6 +950,7 @@ static inline void sparse_sgemv_accum8x4(float *out, const qweight *weights, int
          id = *idx++;
          vxj = _mm256_broadcast_ss(&x[id]);
          vw = _mm256_loadu_ps(&weights[0]);
+         // SGEMV tile by FMA
          vy0 = _mm256_fmadd_ps(vw, vxj, vy0);
 
          vxj = _mm256_broadcast_ss(&x[id+1]);
@@ -862,6 +970,14 @@ static inline void sparse_sgemv_accum8x4(float *out, const qweight *weights, int
       _mm256_storeu_ps (&y[0], vy0);
    }
 }
+      /*
+      /Single precision (fp32)
+      ==============================================================================
+      */
 #endif /*DOT_PROD*/
+/*
+/Define "Matrix/Vector Multiply" (*MV) operations.
+==================================================================================
+*/
 
 #endif /*VEC_AVX_H*/
