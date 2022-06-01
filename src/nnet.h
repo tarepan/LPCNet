@@ -96,6 +96,8 @@ typedef struct {
 
 void compute_activation(float *output, const float *input, int N, int activation);
 
+// Basic pattern:    void layer(parameter, output, input)
+
 void _lpcnet_compute_dense(const DenseLayer *layer, float *output, const float *input);
 
 void compute_mdense(const MDenseLayer *layer, float *output, const float *input);

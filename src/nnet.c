@@ -26,6 +26,27 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
+/**
+ * Neural network components.
+ *
+ * - `vec_swish`
+ * - `compute_activation`
+ * - `sgemv_accum`
+ * - for 'frame rate network' only
+ *   - `compute_embedding`
+ *   - `compute_conv1d`
+ *   - `_lpcnet_compute_dense`
+ * - for 'sample rate network' only
+ *   - `compute_gru_a_input`
+ *   - `accum_embedding` (currently not used...?)
+ *   - `compute_sparse_gru`
+ *   - `compute_gruB`
+ *   - `compute_gru2` (currently not used...?)
+ *   - `compute_gru3` (currently not used...?)
+ *   - `sample_mdense`
+ *   - `compute_mdense` (currently not used...?)
+ */
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -63,7 +84,6 @@ static OPUS_INLINE float relu(float x)
    return x < 0 ? 0 : x;
 }
 
-
 static void sgemv_accum(float *out, const float *weights, int rows, int cols, int col_stride, const float *x)
 {
    int i, j;
@@ -79,6 +99,11 @@ static void sgemv_accum(float *out, const float *weights, int rows, int cols, in
    }
 }
 
+/**
+ *
+ * Args:
+ *   activation - Enum of activation function type (see `nnet.h`)
+ */
 void compute_activation(float *output, const float *input, int N, int activation)
 {
    int i;
@@ -113,18 +138,30 @@ void compute_activation(float *output, const float *input, int N, int activation
    }
 }
 
+/**
+ * Compute 'Linear-σ'.
+ * Args:
+ *   layer -
+ *   output - address to which calculation results are written
+ *   input -
+ */
 void _lpcnet_compute_dense(const DenseLayer *layer, float *output, const float *input)
 {
    int i;
    int N, M;
    int stride;
+   // M - dimension size of input
    M = layer->nb_inputs;
+   // N - dimension size of output
    N = layer->nb_neurons;
    stride = N;
    celt_assert(input != output);
+   // Assign bias to output for subsequent Multiply-Accumulation 
    for (i=0;i<N;i++)
       output[i] = layer->bias[i];
+   // Linear (SGEMV)
    sgemv_accum(output, layer->input_weights, N, M, stride, input);
+   // σ                                   <Enum of σ type>
    compute_activation(output, output, N, layer->activation);
 }
 

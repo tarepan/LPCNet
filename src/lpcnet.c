@@ -44,15 +44,6 @@
 #define FRAME_INPUT_SIZE (NB_FEATURES + EMBED_PITCH_OUT_SIZE)
 
 
-#if 0
-static void print_vector(float *x, int N)
-{
-    int i;
-    for (i=0;i<N;i++) printf("%f ", x[i]);
-    printf("\n");
-}
-#endif
-
 #ifdef END2END
 void rc2lpc(float *lpc, const float *rc)
 {
@@ -76,9 +67,19 @@ void rc2lpc(float *lpc, const float *rc)
     lpc[i] = tmp[i];
   }
 }
-
 #endif
 
+
+/**
+ * Run 'frame rate network'.
+ *
+ * <in>-Conv1d-Conv1d-Linear-σ-Linear-σ---Linear-σ-<gru_a_condition>
+ *                                      |-Linear-σ-<gru_b_condition>
+ *
+ * Args:
+ *   gru_a_condition - Output adress which will be used for conditioning input of GRUa (?)
+ *   gru_b_condition - Output adress which will be used for conditioning input of GRUb (?)
+ */
 void run_frame_network(LPCNetState *lpcnet, float *gru_a_condition, float *gru_b_condition, float *lpc, const float *features)
 {
     NNetState *net;
@@ -95,15 +96,21 @@ void run_frame_network(LPCNetState *lpcnet, float *gru_a_condition, float *gru_b
     net = &lpcnet->nnet;
     RNN_COPY(in, features, NB_FEATURES);
     compute_embedding(&embed_pitch, &in[NB_FEATURES], pitch);
+    // <in>-Conv1d?-<conv1_out>
     compute_conv1d(&feature_conv1, conv1_out, net->feature_conv1_state, in);
     if (lpcnet->frame_count < FEATURE_CONV1_DELAY) RNN_CLEAR(conv1_out, FEATURE_CONV1_OUT_SIZE);
+    // <conv1_out>-Conv1d?-<conv2_out>
     compute_conv1d(&feature_conv2, conv2_out, net->feature_conv2_state, conv1_out);
     celt_assert(FRAME_INPUT_SIZE == FEATURE_CONV2_OUT_SIZE);
     if (lpcnet->frame_count < FEATURES_DELAY) RNN_CLEAR(conv2_out, FEATURE_CONV2_OUT_SIZE);
+    // <conv2_out>-Linear-σ-<dense1_out>
     _lpcnet_compute_dense(&feature_dense1, dense1_out, conv2_out);
+    // <dense1_out>-Linear-σ-<condition>
     _lpcnet_compute_dense(&feature_dense2, condition, dense1_out);
     RNN_COPY(rc, condition, LPC_ORDER);
+    // <condition>-Linear-σ-<gru_a_condition>
     _lpcnet_compute_dense(&gru_a_dense_feature, gru_a_condition, condition);
+    // <condition>-Linear-σ-<gru_b_condition>
     _lpcnet_compute_dense(&gru_b_dense_feature, gru_b_condition, condition);
 #ifdef END2END
     rc2lpc(lpc, rc);
@@ -117,6 +124,11 @@ void run_frame_network(LPCNetState *lpcnet, float *gru_a_condition, float *gru_b
     if (lpcnet->frame_count < 1000) lpcnet->frame_count++;
 }
 
+
+/**
+ * Run 'sample rate network' (AR residual generation).
+ *
+ */
 int run_sample_network(NNetState *net, const float *gru_a_condition, const float *gru_b_condition, int last_exc, int last_sig, int pred, const float *sampling_logit_table, kiss99_ctx *rng)
 {
     float gru_a_input[3*GRU_A_STATE_SIZE];
@@ -138,6 +150,8 @@ int run_sample_network(NNetState *net, const float *gru_a_condition, const float
     return sample_mdense(&dual_fc, net->gru_b_state, sampling_logit_table, rng);
 }
 
+
+// #### Network state handling ###############################################################
 LPCNET_EXPORT int lpcnet_get_size()
 {
     return sizeof(LPCNetState);
@@ -157,7 +171,6 @@ LPCNET_EXPORT int lpcnet_init(LPCNetState *lpcnet)
     return 0;
 }
 
-
 LPCNET_EXPORT LPCNetState *lpcnet_create()
 {
     LPCNetState *lpcnet;
@@ -170,8 +183,16 @@ LPCNET_EXPORT void lpcnet_destroy(LPCNetState *lpcnet)
 {
     free(lpcnet);
 }
+// ######################################################################################
 
 
+/**
+ * Synthesize 1-frame-equivalent waveform.
+ *
+ * Args:
+ *   output - memory to which generated samples (waveform) will be written
+ *   N - the number of samples to be generated (the number of 'sample rate network' loop)
+ */
 void lpcnet_synthesize_tail_impl(LPCNetState *lpcnet, short *output, int N, int preload)
 {
     int i;
@@ -185,10 +206,13 @@ void lpcnet_synthesize_tail_impl(LPCNetState *lpcnet, short *output, int N, int 
    /* Loop SampleRateNetwork `N` times */
     for (i=0;i<N;i++)
     {
+        // LPC order index
         int j;
+        // generated sample
         float pcm;
         int exc;
         int last_sig_ulaw;
+        // generated residual (μ-law)
         int pred_ulaw;
 
        /* `LPC_ORDER`-th order Linear Prediction */
@@ -219,12 +243,29 @@ void lpcnet_synthesize_tail_impl(LPCNetState *lpcnet, short *output, int N, int 
     }
 }
 
+/**
+ * Synthesize 1-frame-equivalent waveform from features.
+ *
+ * Used for normal synthesis and PLC-synthesis (?)
+ *
+ * Args:
+ *   output - memory to which generated samples (waveform) will be written
+ *   N - the number of samples to be generated (the number of 'sample rate network' loop)
+ */
 void lpcnet_synthesize_impl(LPCNetState *lpcnet, const float *features, short *output, int N, int preload)
 {
+    // frame_rate_network :: features -> (lpcnet.gru_a_condition, lpcnet.gru_b_condition, lpcnet->lpc)
     run_frame_network(lpcnet, lpcnet->gru_a_condition, lpcnet->gru_b_condition, lpcnet->lpc, features);
+    // feat2wave :: lpcnet(gru_a_condition/gru_b_condition/lpc) -> output::(N,)
     lpcnet_synthesize_tail_impl(lpcnet, output, N, preload);
 }
 
+/**
+ *
+ * Args:
+ *   output - memory to which generated samples (waveform) will be written
+ *   N - the number of samples to be generated (the number of 'sample rate network' loop)
+ */
 LPCNET_EXPORT void lpcnet_synthesize(LPCNetState *lpcnet, const float *features, short *output, int N) {
     lpcnet_synthesize_impl(lpcnet, features, output, N, 0);
 }
