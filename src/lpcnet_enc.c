@@ -846,11 +846,21 @@ void process_single_frame(LPCNetEncState *st, FILE *ffeat) {
   frame_corr /= 2;
   st->features[st->pcount][NB_BANDS] = .01*(IMAX(66, IMIN(510, best[2]+best[3]))-200);
   st->features[st->pcount][NB_BANDS + 1] = frame_corr-.5;
+
   if (ffeat) {
     fwrite(st->features[st->pcount], sizeof(float), NB_TOTAL_FEATURES, ffeat);
   }
 }
 
+/**
+ *
+ * Args:
+ *   y - output preemphasized waveform
+ *   mem
+ *   x
+ *   coef - preemphasis coefficient
+ *
+ */
 void preemphasis(float *y, float *mem, const float *x, float coef, int N) {
   int i;
   for (i=0;i<N;i++) {
@@ -890,10 +900,19 @@ LPCNET_EXPORT int lpcnet_compute_features(LPCNetEncState *st, const short *pcm, 
   return 0;
 }
 
+/**
+ *
+ * <waveform>-preemphasis- 
+ *
+ * Args:
+ *   pcm - input waveform
+ *
+ */
 int lpcnet_compute_single_frame_features(LPCNetEncState *st, const short *pcm, float features[NB_TOTAL_FEATURES]) {
   int i;
   float x[FRAME_SIZE];
   for (i=0;i<FRAME_SIZE;i++) x[i] = pcm[i];
+  // preemphasis x -> x, preserve state in encState
   preemphasis(x, &st->mem_preemph, x, PREEMPHASIS, FRAME_SIZE);
   compute_frame_features(st, x);
   process_single_frame(st, NULL);
