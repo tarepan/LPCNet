@@ -46,34 +46,32 @@ pcm_bits = 8
 embed_size = 128
 pcm_levels = 2**pcm_bits
 
-def interleave(p, samples):
+def _interleave(p, samples):
     """
-    (Local function)
     """
     p2=tf.expand_dims(p, 3)
     nb_repeats = pcm_levels//(2*p.shape[2])
     p3 = tf.reshape(tf.repeat(tf.concat([1-p2, p2], 3), nb_repeats), (-1, samples, pcm_levels))
     return p3
 
-def tree_to_pdf(p, samples):
+def _tree_to_pdf(p, samples):
     """
-    (Local function)
     """
-    return interleave(p[:,:,1:2], samples) * interleave(p[:,:,2:4], samples) * interleave(p[:,:,4:8], samples) * interleave(p[:,:,8:16], samples) \
-         * interleave(p[:,:,16:32], samples) * interleave(p[:,:,32:64], samples) * interleave(p[:,:,64:128], samples) * interleave(p[:,:,128:256], samples)
+    return _interleave(p[:,:,1:2], samples) * _interleave(p[:,:,2:4], samples) * _interleave(p[:,:,4:8], samples) * _interleave(p[:,:,8:16], samples) \
+         * _interleave(p[:,:,16:32], samples) * _interleave(p[:,:,32:64], samples) * _interleave(p[:,:,64:128], samples) * _interleave(p[:,:,128:256], samples)
 
-def tree_to_pdf_train(p):
+def _tree_to_pdf_train(p):
     """
     (Local function)
     """
     #FIXME: try not to hardcode the 2400 samples (15 frames * 160 samples/frame)
-    return tree_to_pdf(p, 2400)
+    return _tree_to_pdf(p, 2400)
 
-def tree_to_pdf_infer(p):
+def _tree_to_pdf_infer(p):
     """
     (Local function)
     """
-    return tree_to_pdf(p, 1)
+    return _tree_to_pdf(p, 1)
 
 def quant_regularizer(x):
     Q = 128
@@ -368,11 +366,11 @@ def new_lpcnet_model(
     md = MDense(pcm_levels, activation='sigmoid', name='dual_fc')
     # rep(cfeat)------------------------------|
     #            |                            | 
-    # cpcm -------> `rnn` -> `GaussianNoise` --> `rnn2` -> `md` -> Lambda(tree_to_pdf_train)
+    # cpcm -------> `rnn` -> `GaussianNoise` --> `rnn2` -> `md` -> Lambda(_tree_to_pdf_train)
     gru_out1, _ = rnn(rnn_in)
     gru_out1 = GaussianNoise(.005)(gru_out1)
     gru_out2, _ = rnn2(Concatenate()([gru_out1, rep(cfeat)]))
-    ulaw_prob = Lambda(tree_to_pdf_train)(md(gru_out2))
+    ulaw_prob = Lambda(_tree_to_pdf_train)(md(gru_out2))
 
     if adaptation:
         rnn.trainable=False
@@ -403,7 +401,7 @@ def new_lpcnet_model(
         dec_rnn_in = Concatenate()([cpcm_decoder, dec_feat])
     dec_gru_out1, state1 = rnn(dec_rnn_in, initial_state=dec_state1)
     dec_gru_out2, state2 = rnn2(Concatenate()([dec_gru_out1, dec_feat]), initial_state=dec_state2)
-    dec_ulaw_prob = Lambda(tree_to_pdf_infer)(md(dec_gru_out2))
+    dec_ulaw_prob = Lambda(_tree_to_pdf_infer)(md(dec_gru_out2))
     if flag_e2e:
         decoder = Model([dpcm, dec_feat, dec_state1, dec_state2], [dec_ulaw_prob, state1, state2])
     else:
