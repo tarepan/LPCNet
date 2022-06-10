@@ -6,6 +6,7 @@ srcdir=`dirname $0`
 test -n "$srcdir" && cd "$srcdir"
 
 #SHA1 of the first commit compatible with the current model (`72061bc` @ 2021-10-25T20:03)
+# commit=P384 # for LPCNet-efficiency
 commit=72061bc
 ./download_model.sh $commit
 
