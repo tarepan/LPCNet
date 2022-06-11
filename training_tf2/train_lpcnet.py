@@ -1,4 +1,5 @@
-#!/usr/bin/python3
+"""Train LPCNet."""
+
 '''Copyright (c) 2018 Mozilla
 
    Redistribution and use in source and binary forms, with or without
@@ -25,20 +26,37 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 '''
 
-# Train an LPCNet model
-
+import sys
 import argparse
+
+import numpy as np
+import tensorflow as tf
+import tensorflow.keras.backend as K
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger
+import h5py
+
+from ulaw import ulaw2lin, lin2ulaw
+from tf_funcs import *
+from lossfuncs import *
 from dataloader import LPCNetLoader
+
 
 parser = argparse.ArgumentParser(description='Train an LPCNet model')
 
+# Default model:           FrameRateNet128-GRUa384Sparse-GRUb16Dense,  fp32
+# Efficient model (paper):                 GRUa384Sparse-GRUb32Sparse, int8
+
+# Data
 parser.add_argument('features', metavar='<features file>', help='binary features file (float32)')
 parser.add_argument('data', metavar='<audio data file>', help='binary audio data file (uint8)')
 parser.add_argument('output', metavar='<output>', help='trained model file (.h5)')
+# Model mode
 parser.add_argument('--model', metavar='<model>', default='lpcnet', help='LPCNet model python definition (without .py)')
 group1 = parser.add_mutually_exclusive_group()
 group1.add_argument('--quantize', metavar='<input weights>', help='quantize model')
 group1.add_argument('--retrain', metavar='<input weights>', help='continue training model')
+# Model params
 parser.add_argument('--density', metavar='<global density>', type=float, help='average density of the recurrent weights (default 0.1)')
 parser.add_argument('--density-split', nargs=3, metavar=('<update>', '<reset>', '<state>'), type=float, help='density of each recurrent gate (default 0.05, 0.05, 0.2)')
 parser.add_argument('--grub-density', metavar='<global GRU B density>', type=float, help='average density of the recurrent weights (default 1.0)')
@@ -46,85 +64,44 @@ parser.add_argument('--grub-density-split', nargs=3, metavar=('<update>', '<rese
 parser.add_argument('--grua-size', metavar='<units>', default=384, type=int, help='number of units in GRU A (default 384)')
 parser.add_argument('--grub-size', metavar='<units>', default=16, type=int, help='number of units in GRU B (default 16)')
 parser.add_argument('--cond-size', metavar='<units>', default=128, type=int, help='number of units in conditioning network, aka frame rate network (default 128)')
+# Train
 parser.add_argument('--epochs', metavar='<epochs>', default=120, type=int, help='number of epochs to train for (default 120)')
 parser.add_argument('--batch-size', metavar='<batch size>', default=128, type=int, help='batch size to use (default 128)')
 parser.add_argument('--end2end', dest='flag_e2e', action='store_true', help='Enable end-to-end training (with differentiable LPC computation')
+## Optim
 parser.add_argument('--lr', metavar='<learning rate>', type=float, help='learning rate')
 parser.add_argument('--decay', metavar='<decay>', type=float, help='learning rate decay')
 parser.add_argument('--gamma', metavar='<gamma>', type=float, help='adjust u-law compensation (default 2.0, should not be less than 1.0)')
+#
 parser.add_argument('--lookahead', metavar='<nb frames>', default=2, type=int, help='Number of look-ahead frames (default 2)')
 parser.add_argument('--logdir', metavar='<log dir>', help='directory for tensorboard log files')
 
-
 args = parser.parse_args()
 
-density = (0.05, 0.05, 0.2)
-if args.density_split is not None:
-    density = args.density_split
-elif args.density is not None:
-    density = [0.5*args.density, 0.5*args.density, 2.0*args.density];
 
-grub_density = (1., 1., 1.)
-if args.grub_density_split is not None:
-    grub_density = args.grub_density_split
-elif args.grub_density is not None:
-    grub_density = [0.5*args.grub_density, 0.5*args.grub_density, 2.0*args.grub_density];
-
-gamma = 2.0 if args.gamma is None else args.gamma
-
-# Model (default: `lpcnet`)
+# Model module (default: `./lpcnet.py`)
 import importlib
 lpcnet = importlib.import_module(args.model)
 
-import sys
-import numpy as np
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger
-from ulaw import ulaw2lin, lin2ulaw
-import tensorflow.keras.backend as K
-import h5py
-
-import tensorflow as tf
-from tf_funcs import *
-from lossfuncs import *
-#gpus = tf.config.experimental.list_physical_devices('GPU')
-#if gpus:
-#  try:
-#    tf.config.experimental.set_virtual_device_configuration(gpus[0], [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=5120)])
-#  except RuntimeError as e:
-#    print(e)
-
-# Try reducing batch_size if you run out of memory on your GPU
 batch_size = args.batch_size
-
 quantize = args.quantize is not None
 retrain = args.retrain is not None
-
-lpc_order = 16
-
-if quantize:
-    lr = 0.00003
-    decay = 0
-    input_model = args.quantize
-else:
-    lr = 0.001
-    decay = 2.5e-5
-
-if args.lr is not None:
-    lr = args.lr
-
-if args.decay is not None:
-    decay = args.decay
-
-if retrain:
-    input_model = args.retrain
-
 flag_e2e = args.flag_e2e
+lpc_order = 16
+gamma = 2.0 if args.gamma is None else args.gamma
 
+
+# Optimizer/Schedler
+##       arg                                      quantize                default
+lr =    args.lr    if (args.lr    is not None) else 0.00003 if quantize else 0.001
+decay = args.decay if (args.decay is not None) else 0       if quantize else 2.5e-5
 opt = Adam(lr, decay=decay, beta_2=0.99)
-strategy = tf.distribute.experimental.MultiWorkerMirroredStrategy()
 
+# Model initialization
+## For Distributed learning
+strategy = tf.distribute.experimental.MultiWorkerMirroredStrategy()
 with strategy.scope():
+##/
     model, _, _ = lpcnet.new_lpcnet_model(rnn_units1=args.grua_size, rnn_units2=args.grub_size, batch_size=batch_size, training=True, quantize=quantize, flag_e2e = flag_e2e, cond_size=args.cond_size)
     if not flag_e2e:
         model.compile(optimizer=opt, loss=metric_cel, metrics=metric_cel)
@@ -133,8 +110,10 @@ with strategy.scope():
     # Report model architecture
     model.summary()
 
+
+#### Data ####################################################################################################################
 feature_file = args.features
-pcm_file = args.data     # 16 bit unsigned short PCM samples
+pcm_file = args.data     # 16 bit unsigned short PCM samples <data.s16>
 frame_size = model.frame_size
 nb_features = model.nb_used_features + lpc_order
 nb_used_features = model.nb_used_features
@@ -143,9 +122,11 @@ pcm_chunk_size = frame_size*feature_chunk_size
 
 # u for unquantised, load 16 bit PCM samples and convert to mu-law
 
+# np.memmap for partial access to single all-utterance file (<data.s16>)
 data = np.memmap(pcm_file, dtype='int16', mode='r')
 nb_frames = (len(data)//(2*pcm_chunk_size)-1)//batch_size*batch_size
 
+# np.memmap for partial access to single all-feature file (<features.f32>)
 features = np.memmap(feature_file, dtype='float32', mode='r')
 
 # limit to discrete number of frames
@@ -166,18 +147,38 @@ features = np.lib.stride_tricks.as_strided(features, shape=(nb_frames, feature_c
 periods = (.1 + 50*features[:,:,nb_used_features-2:nb_used_features-1]+100).astype('int16')
 #periods = np.minimum(periods, 255)
 
-# dump models to disk as we go
-checkpoint = ModelCheckpoint('{}_{}_{}.h5'.format(args.output, args.grua_size, '{epoch:02d}'))
+# Construct data loader
+loader = LPCNetLoader(data, features, periods, batch_size, e2e=flag_e2e)
+##############################################################################################################################
 
 # Model state
 if quantize or retrain:
     # Adapting from an existing model
+    #               quantize                       retrain
+    input_model = args.quantize if quantize else args.retrain
     model.load_weights(input_model)
 else:
     # Training from scratch
     pass
 
-# Sparsification and Quantization callbacks
+
+#### Sparsification and Quantization ########################################################################
+# GRUa sparsification params
+density = (0.05, 0.05, 0.2)
+if args.density_split is not None:
+    density = args.density_split
+elif args.density is not None:
+    # 1:1:4
+    density = [0.5*args.density, 0.5*args.density, 2.0*args.density];
+
+# GRUb sparsification params
+grub_density = (1., 1., 1.)
+if args.grub_density_split is not None:
+    grub_density = args.grub_density_split
+elif args.grub_density is not None:
+    grub_density = [0.5*args.grub_density, 0.5*args.grub_density, 2.0*args.grub_density];
+
+# Construct callbacks
 if quantize:
     # Full-scale sparsification from step#0 & Gradual quantization from step#10000
     #                                 t_start, t_end, interval,grua_units, density,      quantize
@@ -191,14 +192,16 @@ else:
     # Gradual sparsification from step#2000 (no quantization)
     sparsify = lpcnet.Sparsify(          2000, 40000, 400,                 density)
     grub_sparsify = lpcnet.SparsifyGRUB( 2000, 40000, 400, args.grua_size, grub_density)
+#############################################################################################################
 
-model.save_weights('{}_{}_initial.h5'.format(args.output, args.grua_size))
 
-loader = LPCNetLoader(data, features, periods, batch_size, e2e=flag_e2e)
+# Checkpointing
+checkpoint = ModelCheckpoint('{}_{}_{}.h5'.format(args.output, args.grua_size, '{epoch:02d}'))
+model.save_weights(f"{args.output}_{args.grua_size}_initial.h5")
 
 callbacks = [checkpoint, sparsify, grub_sparsify]
 
-# TensorBoard logging
+# Logging
 if args.logdir is not None:
     callbacks.append(tf.keras.callbacks.TensorBoard(
         log_dir=f'{args.logdir}/{args.output}_{args.grua_size}_logs'
