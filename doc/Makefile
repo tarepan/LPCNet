@@ -22,11 +22,14 @@ endif
 
 all: dump_data lpcnet_demo test_lpcnet test_vec
 
+# Acquire model state archive 8ea8396 from remote repository
 lpcnet_data-8ea8396.tar.gz:
 	wget https://media.xiph.org/lpcnet/data/lpcnet_data-8ea8396.tar.gz
 
+# Acquire state .c files
 download: src/ceps_codebooks.c src/nnet_data.c
 
+# Extract model state file from the archive
 src/ceps_codebooks.c: lpcnet_data-8ea8396.tar.gz
 	tar xvf lpcnet_data-8ea8396.tar.gz
 

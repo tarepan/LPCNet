@@ -14,6 +14,6 @@ commit=72061bc
 
 ./download_model.sh $commit $efficiency
 
+# Construct env generation script `./configure`
 echo "Updating build configuration files for lpcnet, please wait...."
-
 autoreconf -isf
