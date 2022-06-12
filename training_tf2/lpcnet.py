@@ -337,8 +337,8 @@ def new_lpcnet_model(
     fconv2 = Conv1D(cond_size, 3, padding=padding, activation='tanh', name='feature_conv2')
     fdense1 = Dense(cond_size, activation='tanh', name='feature_dense1')
     fdense2 = Dense(cond_size, activation='tanh', name='feature_dense2')
-    cfeat = fconv2(fconv1(cat_feat))
-    cfeat = fdense2(fdense1(cfeat))
+    # Derivatives from original LPCNet: No "residual connection" from @5ae0b07
+    cfeat = fdense2(fdense1(fconv2(fconv1(cat_feat))))
 
     if flag_e2e and quantize:
         fconv1.trainable = False
