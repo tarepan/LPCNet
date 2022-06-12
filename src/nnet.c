@@ -38,7 +38,6 @@
  *   - `_lpcnet_compute_dense`
  * - for 'sample rate network' only
  *   - `compute_gru_a_input`
- *   - `accum_embedding` (currently not used...?)
  *   - `compute_sparse_gru`
  *   - `compute_gruB`
  *   - `compute_gru2` (currently not used...?)
@@ -488,16 +487,4 @@ void compute_gru_a_input(float *output, const float *input, int N, const Embeddi
                            + layer2->embedding_weights[val2*layer2->dim + i]
                            + layer3->embedding_weights[val3*layer3->dim + i];
    }
-}
-
-void accum_embedding(const EmbeddingLayer *layer, float *output, int input)
-{
-   int i;
-   celt_assert(input >= 0);
-   celt_assert(input < layer->nb_inputs);
-   /*if (layer->dim == 64) printf("%d\n", input);*/
-   for (i=0;i<layer->dim;i++)
-   {
-      output[i] += layer->embedding_weights[input*layer->dim + i];
-   }    
 }

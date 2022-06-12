@@ -116,8 +116,6 @@ void compute_conv1d(const Conv1DLayer *layer, float *output, float *mem, const f
 
 void compute_embedding(const EmbeddingLayer *layer, float *output, int input);
 
-void accum_embedding(const EmbeddingLayer *layer, float *output, int input);
-
 void compute_gru_a_input(float *output, const float *input, int N, const EmbeddingLayer *layer1, int val1, const EmbeddingLayer *layer2, int val2, const EmbeddingLayer *layer3, int val3);
 
 #endif /* _MLP_H_ */
