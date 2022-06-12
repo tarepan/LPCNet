@@ -31,12 +31,23 @@ def tf_u2l(u):
 # Computes the LP prediction from the input lag signal and the LP coefficients
 # The inputs xt and lpc conform with the shapes in lpcnet.py (the '2400' is coded keeping this in mind)
 class diff_pred(Layer):
-    def call(self, inputs, lpcoeffs_N = 16, frame_size = 160):
+    def call(self, inputs, lpcoeffs_N: int = 16, frame_size: int = 160):
+        """
+        Args:
+            inputs
+                xt ::(B, T_sample, 1?)    - Sample series (waveform)
+                lpc::(B, T_frame,  Order) - Linear prediction coefficients
+            lpcoeffs_N - The order of linear prediction (the number of coefficients) ?
+        Returns::(B, L, 1)
+        """
         xt = inputs[0]
         lpc = inputs[1]
 
+        # Repeat LP coefficients :: (B, T_frame, Order) -> (B, T_sample=T_frame*frame_size, Order)
         rept = Lambda(lambda x: K.repeat_elements(x , frame_size, 1))
+        # Zero padding at head (maybe)
         zpX = Lambda(lambda x: K.concatenate([0*x[:,0:lpcoeffs_N,:], x],axis = 1))
+        # concat [B, Order-0:L-0, 1], [B, Order-1:L-1, 1], [B, Order-2:L-2, 1] ... [B, 1:L-Order+1, 1] -> (B, L, Order)
         cX = Lambda(lambda x: K.concatenate([x[:,(lpcoeffs_N - i):(lpcoeffs_N - i + 2400),:] for i in range(lpcoeffs_N)],axis = 2))
         
         pred = -Multiply()([rept(lpc),cX(zpX(xt))])

@@ -41,7 +41,7 @@ import sys
 from tf_funcs import *
 from diffembed import diff_Embed
 
-frame_size = 160
+frame_size = 160 # Waveform samples per acoustic frame [samples/frame]
 pcm_bits = 8
 embed_size = 128
 pcm_levels = 2**pcm_bits
@@ -273,7 +273,7 @@ class WeightClip(Constraint):
 def new_lpcnet_model(
     rnn_units1=384,
     rnn_units2=16,
-    nb_used_features=20,
+    nb_used_features:int=20,
     batch_size=128,
     training=False,
     adaptation=False,
@@ -285,24 +285,53 @@ def new_lpcnet_model(
     """
     Construct the `lpcnet` model.
 
-    Frame Rate Network: feat & pitch => f
-    """
-    # Keras functional API based
+    FrameRateNetwork: feat & emb(pitch) => ConvSegFC => f
+    SampleRateNetwork: (f, ) => GRU => sampling => e/residual
+    LinearPrediction: Cx + e
 
-    pcm = Input(shape=(None, 1), batch_size=batch_size)
-    dpcm = Input(shape=(None, 3), batch_size=batch_size)
-    feat = Input(shape=(None, nb_used_features), batch_size=batch_size)
-    pitch = Input(shape=(None, 1), batch_size=batch_size)
-    dec_feat = Input(shape=(None, cond_size))
+    Args:
+        nb_used_features - Dimension size of `feat`, which is used as direct input to FrameRateNetwork
+        batch_size - Batch size
+        cond_size - Dimension size of FrameRateNetwork hidden and output feature
+    Returns:
+        model - Whole model for joint Encoder-Decoder (e.g. for training)
+            inputs:
+                pcm      ::(B, T_sample, 1)     - Sample series (waveform) for AR teacher-forcing in LinearPrediction/Residual/SampleRateNet
+                feat     ::(B, T_frame,  Feat)  - Acoustic feature series for conditioning
+                pitch    ::(B, T_frame,  1)     - Pitch series aligned with `feat`
+                lpcoeffs ::(B, T_frame,  Order) - Linear Prediction coefficients
+            outputs:
+                m_out::()
+
+        encoder - Encoder sub model for separated enc/dec (e.g. for compression)
+        decoder - Decoder sub model for separated enc/dec (e.g. for compression)
+            inputs:
+                dec_feat    
+                dec_state1::(B, h_GRUa) - Initial hidden state of GRUa
+                dec_state2::(B, h_GRUb) - Initial hidden state of GRUb
+    """
+
+    # Inputs
+    #                         Time, Feat
+    pcm =        Input(shape=(None, 1),                batch_size=batch_size)
+    feat =       Input(shape=(None, nb_used_features), batch_size=batch_size)
+    pitch =      Input(shape=(None, 1),                batch_size=batch_size)
+
+    # Inputs of Decoder sub-model
+    dpcm =       Input(shape=(None, 3),                batch_size=batch_size)
+    dec_feat =   Input(shape=(None, cond_size))
     dec_state1 = Input(shape=(rnn_units1,))
     dec_state2 = Input(shape=(rnn_units2,))
 
-    # (`pitch`) -> Embed `pembed` --|
-    # (`feat`) -----------------(cat_feat)
+    #### FrameRateNetwork #########################################################################
+    # Pitch embedding: (B, T, Feat=1) -> (B, T, Emb=64) -> (B, T, Emb=64)
     pembed = Embedding(256, 64, name='embed_pitch')
-    cat_feat = Concatenate()([feat, Reshape((-1, 64))(pembed(pitch))])
+    pitch_embedded = Reshape((-1, 64))(pembed(pitch))
 
-    # (cat_feat) -> Conv `fconv1` -> Conv `fconv2` -> FC `fdense1` -> FC `fdense2` -> (`cfeat`)
+    # Concat: ((B, T, Feat=feat), (B, T, Emb=64)) -> (B, T, Feat=feat+64)
+    cat_feat = Concatenate()([feat, pitch_embedded])
+
+    # ConvSegFC: Conv1d_k3cCs1-tanh-Conv1d_k3cCs1-tanh-SegFC_C-tanh-SegFC_C-tanh
     padding = 'valid' if training else 'same'
     fconv1 = Conv1D(cond_size, 3, padding=padding, activation='tanh', name='feature_conv1')
     fconv2 = Conv1D(cond_size, 3, padding=padding, activation='tanh', name='feature_conv2')
@@ -317,27 +346,32 @@ def new_lpcnet_model(
         fdense1.trainable = False
         fdense2.trainable = False
 
-    error_calc = Lambda(lambda x: tf_l2u(x[0] - tf.roll(x[1],1,axis = 1)))
+    #### Linear Prediction ########################################################################
     if flag_e2e:
         lpcoeffs = diff_rc2lpc(name = "rc2lpc")(cfeat)
     else:
+        # Inputs
+        #                       Time,   Coeff
         lpcoeffs = Input(shape=(None, lpc_order), batch_size=batch_size)
-    tensor_preds = diff_pred(name = "lpc2preds")([pcm,lpcoeffs])
-    past_errors = error_calc([pcm,tensor_preds])
-    embed = diff_Embed(name='embed_sig',initializer = PCMInit())
+    error_calc = Lambda(lambda x: tf_l2u(x[0] - tf.roll(x[1],1,axis = 1)))
 
-    # past_errors --------------------|
-    # tensor_preds -> μLaw `tf_l2u` --|
-    # `pcm` -> μLaw `tf_l2u` -----------> GaussianNoise -> diff_Embed `embed` -> Reshape => `cpcm`
+    # Linear Prediction
+    tensor_preds = diff_pred(name = "lpc2preds")([pcm,lpcoeffs])
+    # Residual μ-law
+    past_errors = error_calc([pcm,tensor_preds])
+
+    #### SampleRateNetwork ########################################################################
+    # past_errors/reidual ---------------------------|
+    # tensor_preds -> μLaw `tf_l2u` -----------------|
+    # `pcm` (teacher forcing) -> μLaw `tf_l2u` -----------> GaussianNoise -> diff_Embed `embed` -> Reshape => `cpcm`
+    embed = diff_Embed(name='embed_sig',initializer = PCMInit())
     cpcm = Concatenate()([tf_l2u(pcm),tf_l2u(tensor_preds),past_errors])
     cpcm = GaussianNoise(.3)(cpcm)
     cpcm = Reshape((-1, embed_size*3))(embed(cpcm))
+
     cpcm_decoder = Reshape((-1, embed_size*3))(embed(dpcm))
 
-    
-    rep = Lambda(lambda x: K.repeat_elements(x, frame_size, 1))
-
-    # Definition of GRU_A & GRU_B
+    # Definition of GRU_A `rnn` & GRU_B `rnn2`
     quant = quant_regularizer if quantize else None
     constraint = WeightClip(0.992)
     if training:
@@ -362,14 +396,20 @@ def new_lpcnet_model(
               kernel_constraint=constraint, recurrent_constraint = constraint, kernel_regularizer=quant, recurrent_regularizer=quant,
               recurrent_activation="sigmoid", reset_after='true')
 
-    rnn_in = Concatenate()([cpcm, rep(cfeat)])
+    # Frame repeat :: (B, T_frame, Feat) -> (B, T_sample=T_frame*frame_size, Feat)
+    rep = Lambda(lambda x: K.repeat_elements(x, frame_size, 1))
+
     md = MDense(pcm_levels, activation='sigmoid', name='dual_fc')
+
     # rep(cfeat)------------------------------|
     #            |                            | 
     # cpcm -------> `rnn` -> `GaussianNoise` --> `rnn2` -> `md` -> Lambda(_tree_to_pdf_train)
-    gru_out1, _ = rnn(rnn_in)
+    rnn_a_in = Concatenate()([cpcm, rep(cfeat)])
+    gru_out1, _ = rnn(rnn_a_in)
     gru_out1 = GaussianNoise(.005)(gru_out1)
-    gru_out2, _ = rnn2(Concatenate()([gru_out1, rep(cfeat)]))
+    rnn_b_in = Concatenate()([gru_out1, rep(cfeat)])
+    gru_out2, _ = rnn2(rnn_b_in)
+
     ulaw_prob = Lambda(_tree_to_pdf_train)(md(gru_out2))
 
     if adaptation:
@@ -378,6 +418,7 @@ def new_lpcnet_model(
         md.trainable=False
         embed.Trainable=False
     
+    # Output#1
     m_out = Concatenate(name='pdf')([tensor_preds,ulaw_prob])
 
     # The whole model
@@ -392,7 +433,7 @@ def new_lpcnet_model(
     model.nb_used_features = nb_used_features
     model.frame_size = frame_size
 
-    # Sub models (encoder & decoder)
+    # Sub models (separated encoder and decoder)
     if not flag_e2e:
         encoder = Model([feat, pitch], cfeat)
         dec_rnn_in = Concatenate()([cpcm_decoder, dec_feat])
