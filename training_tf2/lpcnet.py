@@ -410,6 +410,7 @@ def new_lpcnet_model(
     rnn_b_in = Concatenate()([gru_out1, rep(cfeat)])
     gru_out2, _ = rnn2(rnn_b_in)
 
+    # Derivatives from original LPCNet: "binary probability tree" (proposed in `lpcnet_efficiency`) from @d24f49e
     ulaw_prob = Lambda(_tree_to_pdf_train)(md(gru_out2))
 
     if adaptation:
@@ -417,7 +418,7 @@ def new_lpcnet_model(
         rnn2.trainable=False
         md.trainable=False
         embed.Trainable=False
-    
+
     # Output#1
     m_out = Concatenate(name='pdf')([tensor_preds,ulaw_prob])
 

@@ -147,6 +147,10 @@ int run_sample_network(NNetState *net, const float *gru_a_condition, const float
     RNN_COPY(in_b, net->gru_a_state, GRU_A_STATE_SIZE);
     RNN_COPY(gru_b_input, gru_b_condition, 3*GRU_B_STATE_SIZE);
     compute_gruB(&gru_b, gru_b_input, net->gru_b_state, in_b);
+
+    // Derivatives from original LPCNet (proposed in `lpcnet_efficiency` from @d24f49e):
+    //   - Add "binary probability tree"
+    //     - Remove pitch correlation based voicing decision / probability modification
     return sample_mdense(&dual_fc, net->gru_b_state, sampling_logit_table, rng);
 }
 

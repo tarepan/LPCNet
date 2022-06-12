@@ -44,7 +44,6 @@
  *   - `compute_gru2` (currently not used...?)
  *   - `compute_gru3` (currently not used...?)
  *   - `sample_mdense`
- *   - `compute_mdense` (currently not used...?)
  */
 
 #ifdef HAVE_CONFIG_H
@@ -162,32 +161,6 @@ void _lpcnet_compute_dense(const DenseLayer *layer, float *output, const float *
    // Linear (SGEMV)
    sgemv_accum(output, layer->input_weights, N, M, stride, input);
    // σ                                   <Enum of σ type>
-   compute_activation(output, output, N, layer->activation);
-}
-
-void compute_mdense(const MDenseLayer *layer, float *output, const float *input)
-{
-   int i, c;
-   int N, M, C;
-   int stride;
-   float tmp[MAX_MDENSE_TMP];
-   celt_assert(input != output);
-   M = layer->nb_inputs;
-   N = layer->nb_neurons;
-   C = layer->nb_channels;
-   celt_assert(N*C <= MAX_MDENSE_TMP);
-   stride = N*C;
-   for (i=0;i<N*C;i++)
-      tmp[i] = layer->bias[i];
-   sgemv_accum(tmp, layer->input_weights, N*C, M, stride, input);
-   compute_activation(tmp, tmp, N*C, ACTIVATION_TANH);
-   for (i=0;i<N;i++)
-      output[i] = 0;
-   for (c=0;c<C;c++)
-   {
-      for (i=0;i<N;i++)
-         output[i] += tmp[c*N + i]*layer->factor[c*N + i];
-   }
    compute_activation(output, output, N, layer->activation);
 }
 
