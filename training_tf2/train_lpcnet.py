@@ -112,43 +112,45 @@ with strategy.scope():
 
 
 #### Data ####################################################################################################################
-feature_file = args.features
-pcm_file = args.data     # 16 bit unsigned short PCM samples <data.s16>
-frame_size = model.frame_size
-nb_features = model.nb_used_features + lpc_order
-nb_used_features = model.nb_used_features
-feature_chunk_size = 15
-pcm_chunk_size = frame_size*feature_chunk_size
+sample_per_frame = model.frame_size                  # Waveform samples per acoustic frame [samples/frame]
+nb_used_features = model.nb_used_features            # Feature dim size of `feat`, which is used as direct input to FrameRateNetwork
+frame_per_chunk = 15                                 # (maybe) The number of frames per chunk (item)
+sample_per_chunk = sample_per_frame*frame_per_chunk  # (maybe) The number of samples per chunk (item)
 
 # u for unquantised, load 16 bit PCM samples and convert to mu-law
 
-# np.memmap for partial access to single all-utterance file (<data.s16>)
-data = np.memmap(pcm_file, dtype='int16', mode='r')
-nb_frames = (len(data)//(2*pcm_chunk_size)-1)//batch_size*batch_size
+# np.memmap for partial access to single big file
+## all-utterance file (<data.s16>, 16 bit unsigned short PCM samples)
+samples = np.memmap(args.data, dtype='int16', mode='r')
+## all-feature (acoustic features and pitchs) file (<features.f32>)
+features = np.memmap(args.features, dtype='float32', mode='r')
 
-# np.memmap for partial access to single all-feature file (<features.f32>)
-features = np.memmap(feature_file, dtype='float32', mode='r')
+# The number of chunks in <data.s16> (variable naming is wrong...?)
+nb_frames = (len(samples)//(2*sample_per_chunk)-1)//batch_size*batch_size
 
-# limit to discrete number of frames
-data = data[(4-args.lookahead)*2*frame_size:]
-data = data[:nb_frames*2*pcm_chunk_size]
+#### Samples ####
+# Discard head samples
+samples = samples[(4-args.lookahead)*2*sample_per_frame:]
+# Discard chippings
+samples = samples[:nb_frames*2*sample_per_chunk]
+# samples :: (Chunk, T_sample, IO=2)
+samples = np.reshape(samples, (nb_frames, sample_per_chunk, 2))
 
-
-data = np.reshape(data, (nb_frames, pcm_chunk_size, 2))
-
-#print("ulaw std = ", np.std(out_exc))
-
+#### Acoustic Feature series and LP coefficient series ####
 sizeof = features.strides[-1]
-features = np.lib.stride_tricks.as_strided(features, shape=(nb_frames, feature_chunk_size+4, nb_features),
-                                           strides=(feature_chunk_size*nb_features*sizeof, nb_features*sizeof, sizeof))
+nb_features = nb_used_features + lpc_order # Feature dim size of <features.f32>, equal to `dim_feat + order_lpc`
+# features :: (Chunk, )
+features = np.lib.stride_tricks.as_strided(features, shape=(nb_frames, frame_per_chunk+4, nb_features),
+                                           strides=(frame_per_chunk*nb_features*sizeof, nb_features*sizeof, sizeof))
 #features = features[:, :, :nb_used_features]
 
-
-periods = (.1 + 50*features[:,:,nb_used_features-2:nb_used_features-1]+100).astype('int16')
+#### Pitch Period series ####
+# idx=-1 is Pitch Correlation series, idx=-2 is Pitch Period series (maybe)
+periods = (.1 + 50*features[:,:,nb_used_features-2:nb_used_features-1]+100).astype("int16")
 #periods = np.minimum(periods, 255)
 
 # Construct data loader
-loader = LPCNetLoader(data, features, periods, batch_size, e2e=flag_e2e)
+loader = LPCNetLoader(samples, features, periods, batch_size, e2e=flag_e2e)
 ##############################################################################################################################
 
 # Model state
