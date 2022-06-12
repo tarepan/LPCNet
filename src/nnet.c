@@ -40,8 +40,6 @@
  *   - `compute_gru_a_input`
  *   - `compute_sparse_gru`
  *   - `compute_gruB`
- *   - `compute_gru2` (currently not used...?)
- *   - `compute_gru3` (currently not used...?)
  *   - `sample_mdense`
  */
 
@@ -217,113 +215,6 @@ int sample_mdense(const MDenseLayer *layer, const float *input, const float *sam
 }
 
 
-#if 0
-void compute_gru(const GRULayer *gru, float *state, const float *input)
-{
-   int i;
-   int N, M;
-   int stride;
-   float tmp[MAX_RNN_NEURONS];
-   float z[MAX_RNN_NEURONS];
-   float r[MAX_RNN_NEURONS];
-   float h[MAX_RNN_NEURONS];
-   celt_assert(gru->nb_neurons <= MAX_RNN_NEURONS);
-   celt_assert(input != state);
-   M = gru->nb_inputs;
-   N = gru->nb_neurons;
-   stride = 3*N;
-   /* Compute update gate. */
-   for (i=0;i<N;i++)
-      z[i] = gru->bias[i];
-   if (gru->reset_after)
-   {
-      for (i=0;i<N;i++)
-         z[i] += gru->bias[3*N + i];
-   }
-   sgemv_accum(z, gru->input_weights, N, M, stride, input);
-   sgemv_accum(z, gru->recurrent_weights, N, N, stride, state);
-   compute_activation(z, z, N, ACTIVATION_SIGMOID);
-
-   /* Compute reset gate. */
-   for (i=0;i<N;i++)
-      r[i] = gru->bias[N + i];
-   if (gru->reset_after)
-   {
-      for (i=0;i<N;i++)
-         r[i] += gru->bias[4*N + i];
-   }
-   sgemv_accum(r, &gru->input_weights[N], N, M, stride, input);
-   sgemv_accum(r, &gru->recurrent_weights[N], N, N, stride, state);
-   compute_activation(r, r, N, ACTIVATION_SIGMOID);
-
-   /* Compute output. */
-   for (i=0;i<N;i++)
-      h[i] = gru->bias[2*N + i];
-   if (gru->reset_after)
-   {
-      for (i=0;i<N;i++)
-         tmp[i] = gru->bias[5*N + i];
-      sgemv_accum(tmp, &gru->recurrent_weights[2*N], N, N, stride, state);
-      for (i=0;i<N;i++)
-         h[i] += tmp[i] * r[i];
-      sgemv_accum(h, &gru->input_weights[2*N], N, M, stride, input);
-   } else {
-      for (i=0;i<N;i++)
-         tmp[i] = state[i] * r[i];
-      sgemv_accum(h, &gru->input_weights[2*N], N, M, stride, input);
-      sgemv_accum(h, &gru->recurrent_weights[2*N], N, N, stride, tmp);
-   }
-   compute_activation(h, h, N, gru->activation);
-   for (i=0;i<N;i++)
-      h[i] = z[i]*state[i] + (1-z[i])*h[i];
-   for (i=0;i<N;i++)
-      state[i] = h[i];
-}
-#endif
-
-void compute_gru2(const GRULayer *gru, float *state, const float *input)
-{
-   int i;
-   int N, M;
-   int stride;
-   float zrh[3*MAX_RNN_NEURONS];
-   float recur[3*MAX_RNN_NEURONS];
-   float *z;
-   float *r;
-   float *h;
-   M = gru->nb_inputs;
-   N = gru->nb_neurons;
-   z = zrh;
-   r = &zrh[N];
-   h = &zrh[2*N];
-   celt_assert(gru->nb_neurons <= MAX_RNN_NEURONS);
-   celt_assert(input != state);
-   celt_assert(gru->reset_after);
-   stride = 3*N;
-   /* Compute update gate. */
-#ifdef USE_SU_BIAS
-   for (i=0;i<3*N;i++)
-      zrh[i] = gru->subias[i];
-#else
-   for (i=0;i<3*N;i++)
-      zrh[i] = gru->bias[i];
-#endif
-   sgemv_accum8x4(zrh, gru->input_weights, 3*N, M, stride, input);
-   for (i=0;i<3*N;i++)
-      recur[i] = gru->bias[3*N + i];
-   sgemv_accum8x4(recur, gru->recurrent_weights, 3*N, N, stride, state);
-   for (i=0;i<2*N;i++)
-      zrh[i] += recur[i];
-   compute_activation(zrh, zrh, 2*N, ACTIVATION_SIGMOID);
-   for (i=0;i<N;i++)
-      h[i] += recur[2*N+i]*r[i];
-   compute_activation(h, h, N, gru->activation);
-   for (i=0;i<N;i++)
-      h[i] = z[i]*state[i] + (1-z[i])*h[i];
-   for (i=0;i<N;i++)
-      state[i] = h[i];
-}
-
 void compute_gruB(const GRULayer *gru, const float* gru_b_condition, float *state, const float *input)
 {
    int i;
@@ -372,40 +263,6 @@ void compute_gruB(const GRULayer *gru, const float* gru_b_condition, float *stat
       state[i] = h[i];
 }
 
-
-void compute_gru3(const GRULayer *gru, float *state, const float *input)
-{
-   int i;
-   int N;
-   int stride;
-   float zrh[3*MAX_RNN_NEURONS];
-   float recur[3*MAX_RNN_NEURONS];
-   float *z;
-   float *r;
-   float *h;
-   N = gru->nb_neurons;
-   z = zrh;
-   r = &zrh[N];
-   h = &zrh[2*N];
-   celt_assert(gru->nb_neurons <= MAX_RNN_NEURONS);
-   celt_assert(input != state);
-   celt_assert(gru->reset_after);
-   stride = 3*N;
-   RNN_COPY(zrh, input, 3*N);
-   for (i=0;i<3*N;i++)
-      recur[i] = gru->bias[3*N + i];
-   sgemv_accum8x4(recur, gru->recurrent_weights, 3*N, N, stride, state);
-   for (i=0;i<2*N;i++)
-      zrh[i] += recur[i];
-   compute_activation(zrh, zrh, 2*N, ACTIVATION_SIGMOID);
-   for (i=0;i<N;i++)
-      h[i] += recur[2*N+i]*r[i];
-   compute_activation(h, h, N, gru->activation);
-   for (i=0;i<N;i++)
-      h[i] = z[i]*state[i] + (1-z[i])*h[i];
-   for (i=0;i<N;i++)
-      state[i] = h[i];
-}
 
 /* The input of this GRU is after the input matrix multiply. */
 void compute_sparse_gru(const SparseGRULayer *gru, float *state, const float *input)

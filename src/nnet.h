@@ -96,19 +96,13 @@ typedef struct {
 
 void compute_activation(float *output, const float *input, int N, int activation);
 
-// Basic pattern:    void layer(parameter, output, input)
+// Basic pattern: void layer(parameter, state/output, input)
 
 void _lpcnet_compute_dense(const DenseLayer *layer, float *output, const float *input);
 
 int sample_mdense(const MDenseLayer *layer,  const float *input, const float *sampling_logit_table, kiss99_ctx *rng);
 
-void compute_gru(const GRULayer *gru, float *state, const float *input);
-
-void compute_gru2(const GRULayer *gru, float *state, const float *input);
-
 void compute_gruB(const GRULayer *gru, const float* gru_b_condition, float *state, const float *input);
-
-void compute_gru3(const GRULayer *gru, float *state, const float *input);
 
 void compute_sparse_gru(const SparseGRULayer *gru, float *state, const float *input);
 
