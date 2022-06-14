@@ -32,6 +32,7 @@ from typing import Tuple
 
 import numpy as np
 import tensorflow as tf
+from tensorflow import keras
 import tensorflow.keras.backend as K
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger
@@ -43,6 +44,7 @@ from lossfuncs import *
 from dataloader import LPCNetLoader
 
 
+#### Args ####################################################################################################################
 parser = argparse.ArgumentParser(description='Train an LPCNet model')
 
 # Default model:           FrameRateNet128-GRUa384Sparse-GRUb16Dense,  fp32
@@ -80,10 +82,14 @@ parser.add_argument('--gamma', metavar='<gamma>', type=float, help='adjust u-law
 #
 parser.add_argument('--lookahead', metavar='<nb frames>', default=2, type=int, help='Number of look-ahead frames (default 2)')
 parser.add_argument('--logdir', metavar='<log dir>', help='directory for tensorboard log files')
+parser.add_argument('--resume-model', metavar='<epoch>', type=str, help='Resume training from this model')
+parser.add_argument('--from-epoch', metavar='<epoch>', type=int, default=0, help='Resume training from this epoch')
+parser.add_argument('--from-step', metavar='<step>', type=int, default=0, help='Resume training from this global step')
 
 args = parser.parse_args()
 
 
+#### Confs ###################################################################################################################
 # Model module (default: `./lpcnet.py`)
 import importlib
 lpcnet = importlib.import_module(args.model)
@@ -93,27 +99,43 @@ quantize = args.quantize is not None
 retrain = args.retrain is not None
 flag_e2e = args.flag_e2e
 lpc_order = 16
-gamma = 2.0 if args.gamma is None else args.gamma
 
 
-# Optimizer/Schedler
-##       arg                                      quantize                default
-lr =    args.lr    if (args.lr    is not None) else 0.00003 if quantize else 0.001
-decay = args.decay if (args.decay is not None) else 0       if quantize else 2.5e-5
-opt = Adam(lr, decay=decay, beta_2=0.99)
-
-# Model initialization
-## For Distributed learning
-strategy = tf.distribute.experimental.MultiWorkerMirroredStrategy()
-with strategy.scope():
-##/
-    model, _, _ = lpcnet.new_lpcnet_model(rnn_units1=args.grua_size, rnn_units2=args.grub_size, batch_size=batch_size, training=True, quantize=quantize, flag_e2e = flag_e2e, cond_size=args.cond_size)
-    if not flag_e2e:
-        model.compile(optimizer=opt, loss=metric_cel, metrics=metric_cel)
-    else:
-        model.compile(optimizer=opt, loss = [interp_mulaw(gamma=gamma), loss_matchlar()], loss_weights = [1.0, 2.0], metrics={'pdf':[metric_cel,metric_icel,metric_exc_sd,metric_oginterploss]})
-    # Report model architecture
+#### Model ###################################################################################################################
+## Training resume
+if args.resume_model is not None:
+    model = keras.models.load_model(args.resume_model)
+    print(f"Resumed from Model {args.resume_model}")
     model.summary()
+    # todo: Check whether `load_model` restore variable in the model (In our case, .frame_size & .nb_used_features)
+    print(f"values from the model: .frame_size={model.frame_size}, .nb_used_features={model.nb_used_features}")
+## From scratch
+else:
+    gamma = 2.0 if args.gamma is None else args.gamma
+
+    # Optimizer/Scheduler
+    ##       arg                                      quantize                default
+    lr =    args.lr    if (args.lr    is not None) else 0.00003 if quantize else 0.001
+    decay = args.decay if (args.decay is not None) else 0       if quantize else 2.5e-5
+    opt = Adam(lr, decay=decay, beta_2=0.99)
+
+    # Model
+    ## For Distributed learning
+    strategy = tf.distribute.experimental.MultiWorkerMirroredStrategy()
+    with strategy.scope():
+    ##/
+        model, _, _ = lpcnet.new_lpcnet_model(rnn_units1=args.grua_size, rnn_units2=args.grub_size, batch_size=batch_size, training=True, quantize=quantize, flag_e2e = flag_e2e, cond_size=args.cond_size)
+        if not flag_e2e:
+            model.compile(optimizer=opt, loss=metric_cel, metrics=metric_cel)
+        else:
+            model.compile(optimizer=opt, loss = [interp_mulaw(gamma=gamma), loss_matchlar()], loss_weights = [1.0, 2.0], metrics={'pdf':[metric_cel,metric_icel,metric_exc_sd,metric_oginterploss]})
+        # Report model architecture
+        model.summary()
+
+## Additional training mode
+if quantize or retrain:
+    input_model = args.quantize if quantize else args.retrain
+    model.load_weights(input_model)
 
 
 #### Data ####################################################################################################################
@@ -121,7 +143,6 @@ sample_per_frame = model.frame_size                  # Waveform samples per acou
 nb_used_features = model.nb_used_features            # Feature dim size of `feat`, which is used as direct input to FrameRateNetwork
 frame_per_chunk = 15                                 # (maybe) The number of frames per chunk (item)
 sample_per_chunk = sample_per_frame*frame_per_chunk  # (maybe) The number of samples per chunk (item)
-
 # u for unquantised, load 16 bit PCM samples and convert to mu-law
 
 # np.memmap for partial access to single big file
@@ -156,20 +177,9 @@ periods = (.1 + 50*features[:,:,nb_used_features-2:nb_used_features-1]+100).asty
 
 # Construct data loader
 loader = LPCNetLoader(samples, features, periods, batch_size, e2e=flag_e2e)
-##############################################################################################################################
-
-# Model state
-if quantize or retrain:
-    # Adapting from an existing model
-    #               quantize                       retrain
-    input_model = args.quantize if quantize else args.retrain
-    model.load_weights(input_model)
-else:
-    # Training from scratch
-    pass
 
 
-#### Sparsification and Quantization ########################################################################
+#### Sparsification and Quantization #########################################################################################
 # GRUa sparsification params: '<update>', '<reset>', '<state>'
 grua_density: Tuple[float, float, float] = (0.05, 0.05, 0.2)
 if args.density_split is not None:
@@ -198,12 +208,12 @@ else:
     t_start, t_end, interval =  2000, 40000, 400
 
 # Construct callbacks
-grua_sparsify = lpcnet.SparsifyGRUA(t_start, t_end, interval,                 grua_density, quantize=quantize)
-grub_sparsify = lpcnet.SparsifyGRUB(t_start, t_end, interval, args.grua_size, grub_density, quantize=quantize)
-#############################################################################################################
+grua_sparsify = lpcnet.SparsifyGRUA(t_start, t_end, interval,                 grua_density, quantize=quantize, from_step=args.from_step)
+grub_sparsify = lpcnet.SparsifyGRUB(t_start, t_end, interval, args.grua_size, grub_density, quantize=quantize, from_step=args.from_step)
 
 
-# Checkpointing
+##############################################################################################################################
+# Checkpointing (Model weights & Optimizer state)
 checkpoint = ModelCheckpoint('{}_{}_{}.h5'.format(args.output, args.grua_size, '{epoch:02d}'))
 model.save_weights(f"{args.output}_{args.grua_size}_initial.h5")
 
@@ -216,4 +226,4 @@ if args.logdir is not None:
     ))
 
 # Run training (always start from epoch#0 (`initial_epoch` is not used))
-model.fit(loader, epochs=args.epochs, validation_split=0.0, callbacks=callbacks)
+model.fit(loader, initial_epoch=args.from_epoch, epochs=args.epochs, validation_split=0.0, callbacks=callbacks)

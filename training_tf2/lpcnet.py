@@ -85,7 +85,7 @@ def quant_regularizer(x):
 
 
 class SparsifyGRUA(Callback):
-    def __init__(self, t_start: int, t_end: int, interval: int, density: Tuple[float, float, float], quantize: bool = False):
+    def __init__(self, t_start: int, t_end: int, interval: int, density: Tuple[float, float, float], quantize: bool = False, from_step: int = 0):
         """
         Args:
             t_start: The global step at which weight processing gradually start [step]
@@ -93,6 +93,7 @@ class SparsifyGRUA(Callback):
             interval: Weight processing interval [step]
             density: Sparsification density parameter
             quantize: Whether to quantize, which also affects spasification schedule
+            from_step - Resume training from this global step
         """
         super().__init__()
 
@@ -103,8 +104,7 @@ class SparsifyGRUA(Callback):
         self.quantize = quantize
 
         # The Number of global steps (processed batches)
-        # [todo] For train resume, needs .batch restore (hook has no way to know the global step number)
-        self.batch = 0
+        self.batch = from_step
 
     def on_batch_end(self, batch, logs=None):
         """(TF API) Called every batch end."""
@@ -205,7 +205,7 @@ class SparsifyGRUA(Callback):
             layer.set_weights(w)
 
 class SparsifyGRUB(Callback):
-    def __init__(self, t_start, t_end, interval, grua_units, density, quantize=False):
+    def __init__(self, t_start, t_end, interval, grua_units, density, quantize=False, from_step:int=0):
         super().__init__()
 
         self.t_start = t_start
@@ -216,8 +216,7 @@ class SparsifyGRUB(Callback):
         self.quantize = quantize
 
         # The Number of global steps (processed batches)
-        # [todo] For train resume, needs .batch restore (hook has no way to know the global step number)
-        self.batch = 0
+        self.batch = from_step
 
     def on_batch_end(self, batch, logs=None):
         """(TF API) Called every batch end."""
@@ -324,7 +323,7 @@ def new_lpcnet_model(
     quantize: bool = False,
     flag_e2e: bool = False,
     cond_size: int = 128,
-    lpc_order: int= 16,
+    lpc_order: int = 16,
 ):
     """
     Construct the `lpcnet` model.
