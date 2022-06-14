@@ -81,6 +81,8 @@ class MDense(Layer):
     def get_config(self):
         config = {
             'units': self.units,
+            'outputs': self.units,
+            'channels': self.channels,
             'activation': activations.serialize(self.activation),
             'use_bias': self.use_bias,
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
@@ -93,3 +95,13 @@ class MDense(Layer):
         }
         base_config = super(MDense, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
+
+    @classmethod
+    def from_config(cls, config):
+        """(TF API) Instantiate this class from serialized config."""
+        units = config.pop("units", None)
+        if units is not None:
+            # Hack for old broken checkpoints
+            return cls(outputs=units, **config)
+        else:
+            return cls(**config)
