@@ -28,6 +28,7 @@
 
 import sys
 import argparse
+from typing import Tuple
 
 import numpy as np
 import tensorflow as tf
@@ -169,35 +170,36 @@ else:
 
 
 #### Sparsification and Quantization ########################################################################
-# GRUa sparsification params
-density = (0.05, 0.05, 0.2)
+# GRUa sparsification params: '<update>', '<reset>', '<state>'
+grua_density: Tuple[float, float, float] = (0.05, 0.05, 0.2)
 if args.density_split is not None:
-    density = args.density_split
+    grua_density = args.density_split
 elif args.density is not None:
     # 1:1:4
-    density = [0.5*args.density, 0.5*args.density, 2.0*args.density];
+    grua_density = [0.5*args.density,      0.5*args.density,      2.0*args.density];
 
 # GRUb sparsification params
-grub_density = (1., 1., 1.)
+grub_density: Tuple[float, float, float] = (1., 1., 1.)
 if args.grub_density_split is not None:
     grub_density = args.grub_density_split
 elif args.grub_density is not None:
+    # 1:1:4
     grub_density = [0.5*args.grub_density, 0.5*args.grub_density, 2.0*args.grub_density];
 
-# Construct callbacks
+# Schedules
 if quantize:
     # Full-scale sparsification from step#0 & Gradual quantization from step#10000
-    #                                 t_start, t_end, interval,grua_units, density,      quantize
-    sparsify = lpcnet.Sparsify(         10000, 30000, 100,                 density,      quantize=True)
-    grub_sparsify = lpcnet.SparsifyGRUB(10000, 30000, 100, args.grua_size, grub_density, quantize=True)
+    t_start, t_end, interval = 10000, 30000, 100
 elif retrain:
     # Full-scale sparsification from step#0 (no quantization)
-    sparsify = lpcnet.Sparsify(             0,     0,   1,                 density)
-    grub_sparsify = lpcnet.SparsifyGRUB(    0,     0,   1, args.grua_size, grub_density)
+    t_start, t_end, interval =     0,     0,   1
 else:
-    # Gradual sparsification from step#2000 (no quantization)
-    sparsify = lpcnet.Sparsify(          2000, 40000, 400,                 density)
-    grub_sparsify = lpcnet.SparsifyGRUB( 2000, 40000, 400, args.grua_size, grub_density)
+    # Gradual sparsification from step#2000 (no quantization). c.f. Total 230_000 steps in original LPCNet paper
+    t_start, t_end, interval =  2000, 40000, 400
+
+# Construct callbacks
+grua_sparsify = lpcnet.SparsifyGRUA(t_start, t_end, interval,                 grua_density, quantize=quantize)
+grub_sparsify = lpcnet.SparsifyGRUB(t_start, t_end, interval, args.grua_size, grub_density, quantize=quantize)
 #############################################################################################################
 
 
@@ -205,7 +207,7 @@ else:
 checkpoint = ModelCheckpoint('{}_{}_{}.h5'.format(args.output, args.grua_size, '{epoch:02d}'))
 model.save_weights(f"{args.output}_{args.grua_size}_initial.h5")
 
-callbacks = [checkpoint, sparsify, grub_sparsify]
+callbacks = [checkpoint, grua_sparsify, grub_sparsify]
 
 # Logging
 if args.logdir is not None:

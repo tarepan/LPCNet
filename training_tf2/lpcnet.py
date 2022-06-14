@@ -25,6 +25,8 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 '''
 
+from typing import Tuple
+
 import math
 import tensorflow as tf
 from tensorflow.keras.models import Model
@@ -79,26 +81,31 @@ def quant_regularizer(x):
     #return .01 * tf.reduce_mean(1 - tf.math.cos(2*3.1415926535897931*(Q*x-tf.round(Q*x))))
     return .01 * tf.reduce_mean(K.sqrt(K.sqrt(1.0001 - tf.math.cos(2*3.1415926535897931*(Q*x-tf.round(Q*x))))))
 
-class Sparsify(Callback):
-    def __init__(self, t_start, t_end, interval, density, quantize:bool=False):
+class SparsifyGRUA(Callback):
+    def __init__(self, t_start: int, t_end: int, interval: int, density: Tuple[float, float, float], quantize: bool = False):
         """
         Args:
-            t_start: The global step at which weight processing gradually start
-            t_end:   The global step from which weight processing is full-scale
-            interval: Weight processing interval
+            t_start: The global step at which weight processing gradually start [step]
+            t_end:   The global step from which weight processing is full-scale [step]
+            interval: Weight processing interval [step]
             density: Sparsification density parameter
             quantize: Whether to quantize, which also affects spasification schedule
         """
-        super(Sparsify, self).__init__()
-        # Number of global step (processed batches)
-        self.batch = 0
+        super().__init__()
+
         self.t_start = t_start
         self.t_end = t_end
         self.interval = interval
         self.final_density = density
         self.quantize = quantize
 
+        # The Number of global steps (processed batches)
+        # [todo] For train resume, needs .batch restore (hook has no way to know the global step number)
+        self.batch = 0
+
     def on_batch_end(self, batch, logs=None):
+        """(TF API) Called every batch end."""
+
         self.batch += 1
 
         # ## Shedules
@@ -114,39 +121,69 @@ class Sparsify(Callback):
         #    quantize_mode OR (global_step > t_start AND every `interval` steps) OR (global_step > t_end)
         if self.quantize or (self.batch > self.t_start and (self.batch-self.t_start) % self.interval == 0) or self.batch >= self.t_end:
             layer = self.model.get_layer('gru_a')
+            # w::[Wih::(dim_i, 3*dim_h), Whh::(dim_h, 3*dim_h), b::(2*3*dim_h,)] - GRU weights
             w = layer.get_weights()
+            # p::(dim_h, 3*dim_h) - Recurrent weight matrix Whh
             p = w[1]
-            nb = p.shape[1]//p.shape[0]
+            # The number of gates
+            nb: int = p.shape[1]//p.shape[0]
+            assert nb == 3, f"The number of gates should be 3 in GRU, but {nb}"
+            # N - dim_h
             N = p.shape[0]
-            #print("nb = ", nb, ", N = ", N);
-            #print(p.shape)
-            #print ("density = ", density)
 
             # Sparsification
             for k in range(nb):
-                density = self.final_density[k]
+                # gate_k ( g_update | g_reset | g_state )
+                ## density - Sparsification density of g_k
+                density: float = self.final_density[k]
+                ## A::(dim_h, dim_h) - g_k sub-matrix
+                A = p[:, k*N:(k+1)*N]
+
                 # Density attenuation until t_end (quantize_mode is always full sparsification)
                 if self.batch < self.t_end and not self.quantize:
                     r = 1 - (self.batch-self.t_start)/(self.t_end - self.t_start)
-                    density = 1 - (1-self.final_density[k])*(1 - r*r*r)
-                # /Density update
-                A = p[:, k*N:(k+1)*N]
+                    #         1 -   sparsity * attenuation_rate
+                    density = 1 - (1-density)*(1 - r*r*r)
+
+                #### Block masking by keeping topN blocks and diagonal blocks ###################
+                # Exclude diagonal terms, which are preserved independently
                 A = A - np.diag(np.diag(A))
-                #This is needed because of the CuDNNGRU strange weight ordering
+
+                # This is needed because of the CuDNNGRU strange weight ordering
                 A = np.transpose(A, (1, 0))
+
+                # Derivatives: 16x1 @original -> 8x4 @lpcnet_efficiency (from @3ae54e9)
+                # 8x4 Block-nize (value squared)
+                ## (dim_h, dim_h) -> (dim_h/4, 4, dim_h/8, 8)
                 L=np.reshape(A, (N//4, 4, N//8, 8))
+                ## (dim_h/4, 4, dim_h/8, 8) -> **2 -> sum -> (dim_h/4, 4, dim_h/8)
                 S=np.sum(L*L, axis=-1)
+                ## (dim_h/4, 4, dim_h/8) -> (dim_h/4, dim_h/8)
                 S=np.sum(S, axis=1)
+
+                # Zero mask threshold for keeping TopN blocks
                 SS=np.sort(np.reshape(S, (-1,)))
-                thresh = SS[round(N*N//32*(1-density))]
+                idx_thresh = round(N*N//32*(1-density)) # num_blocks*sparsity
+                thresh = SS[idx_thresh]
+
+                # ZeroMask generation
+                ## Block-wise mask (False=0 | True=1)
                 mask = (S>=thresh).astype('float32')
+                ## Block to sub-matrix A
                 mask = np.repeat(mask, 4, axis=0)
                 mask = np.repeat(mask, 8, axis=1)
+                ## Diagonal term preservation
+                ##                non_diag/0    diag/1
+                ##      masked/0      0           1
+                ##  non_masked/1      1         2 -> clipped to 1
                 mask = np.minimum(1, mask + np.diag(np.ones((N,))))
-                #This is needed because of the CuDNNGRU strange weight ordering
+
+                # This is needed because of the CuDNNGRU strange weight ordering
                 mask = np.transpose(mask, (1, 0))
+
+                # In-place apply of sparsification mask
                 p[:, k*N:(k+1)*N] = p[:, k*N:(k+1)*N]*mask
-                #print(thresh, np.mean(mask))
+                #################################################################################
             # /Sparsification
 
             #  quantize_mode AND ((global_step > t_start AND every `interval` steps) OR global_step > t_end)
@@ -166,8 +203,8 @@ class Sparsify(Callback):
 
 class SparsifyGRUB(Callback):
     def __init__(self, t_start, t_end, interval, grua_units, density, quantize=False):
-        super(SparsifyGRUB, self).__init__()
-        self.batch = 0
+        super().__init__()
+
         self.t_start = t_start
         self.t_end = t_end
         self.interval = interval
@@ -175,8 +212,13 @@ class SparsifyGRUB(Callback):
         self.grua_units = grua_units
         self.quantize = quantize
 
+        # The Number of global steps (processed batches)
+        # [todo] For train resume, needs .batch restore (hook has no way to know the global step number)
+        self.batch = 0
+
     def on_batch_end(self, batch, logs=None):
-        #print("batch number", self.batch)
+        """(TF API) Called every batch end."""
+
         self.batch += 1
         if self.quantize or (self.batch > self.t_start and (self.batch-self.t_start) % self.interval == 0) or self.batch >= self.t_end:
             #print("constrain");
