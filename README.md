@@ -18,6 +18,12 @@ This software is an open source starting point for LPCNet/WaveRNN-based speech s
 ### Setup
 Following commands build inference program written by C for x86/64 and ARM CPU.  
 
+#### Step 0 - Model data
+If use your trained model data, skip this step.  
+Else, you can download pretrained model.  
+```bash
+./download_model.sh
+```
 #### Step 1 - Env
 Set variables for vectorization.  
 By default, the program attempt to use 8-bit dot product instructions on AVX\*/Neon.  

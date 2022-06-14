@@ -1,21 +1,20 @@
 #!/bin/sh
 set -e
 
-# `$1`: model specifier
-# `$2`: 1 if efficiency mode else 0
+model_name=72061bc # fist compatible commit @ 2021-10-25T20:03
+model_dir=""
+# model_name=P384 # model name
+# model_dir="lpcnet_efficiency/"
 
-model=lpcnet_data-$1.tar.gz
-
-# Mode
-if [ $2 -eq 1 ]; then
-        echo "LPCNet-efficiency mode"
-        eff=lpcnet_efficiency/
-fi
+model_archive="lpcnet_data-${model_name}.tar.gz"
 
 # Data download
-if [ ! -f $model ]; then
+if [ ! -f $model_archive ]; then
         echo "Downloading latest model"
-        wget "https://media.xiph.org/lpcnet/data/${eff}${model}"
+        wget "https://media.xiph.org/lpcnet/data/${model_dir}${model_archive}"
 fi
-tar xvf $model
+
+# Data extraction
+tar xvf $model_archive
+# `src/nnet_data.c` & `src/nnet_data.h`
 touch src/nnet_data.[ch]
