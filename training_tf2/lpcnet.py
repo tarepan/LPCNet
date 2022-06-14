@@ -75,11 +75,14 @@ def _tree_to_pdf_infer(p):
     """
     return _tree_to_pdf(p, 1)
 
+
 def quant_regularizer(x):
+    """(maybe) Force weights to be integers for quantization in inference."""
     Q = 128
-    Q_1 = 1./Q
     #return .01 * tf.reduce_mean(1 - tf.math.cos(2*3.1415926535897931*(Q*x-tf.round(Q*x))))
+    #                           (√√(1 - cos(2pi*points))), -0.5<=points<=+0.5
     return .01 * tf.reduce_mean(K.sqrt(K.sqrt(1.0001 - tf.math.cos(2*3.1415926535897931*(Q*x-tf.round(Q*x))))))
+
 
 class SparsifyGRUA(Callback):
     def __init__(self, t_start: int, t_end: int, interval: int, density: Tuple[float, float, float], quantize: bool = False):
@@ -296,7 +299,6 @@ class PCMInit(Initializer):
 
 class WeightClip(Constraint):
     '''Clips the weights incident to each hidden unit to be inside a range
-    (Local class)
     '''
     def __init__(self, c=2):
         self.c = c
@@ -313,35 +315,38 @@ class WeightClip(Constraint):
 
 
 def new_lpcnet_model(
-    rnn_units1=384,
-    rnn_units2=16,
-    nb_used_features:int=20,
-    batch_size=128,
-    training=False,
-    adaptation=False,
-    quantize=False,
-    flag_e2e = False,
-    cond_size=128,
-    lpc_order=16
+    rnn_units1: int = 384,
+    rnn_units2: int= 16,
+    dim_feat: int = 20,
+    batch_size: int = 128,
+    training: bool = False,
+    adaptation: bool = False,
+    quantize: bool = False,
+    flag_e2e: bool = False,
+    cond_size: int = 128,
+    lpc_order: int= 16,
 ):
     """
     Construct the `lpcnet` model.
 
-    FrameRateNetwork: feat & emb(pitch) => ConvSegFC => f
-    SampleRateNetwork: (f, ) => GRU => sampling => e/residual
-    LinearPrediction: Cx + e
-
     Args:
-        nb_used_features - Dimension size of `feat`, which is used as direct input to FrameRateNetwork
+        rnn_units1 - Dimension size of GRUa
+        rnn_units2 - Dimension size of GRUb
+        dim_feat - Dimension size of `feat`, which is used as direct input to FrameRateNetwork
         batch_size - Batch size
+        training - mode?
+        adaptation - mode?
+        quantize - mode?
+        flag_e2e - Whether to use End-to-End mode
         cond_size - Dimension size of FrameRateNetwork hidden and output feature
+        lpc_order - Order of linear prediction
     Returns:
         model - Whole model for joint Encoder-Decoder (e.g. for training)
             inputs:
                 pcm      ::(B, T_sample, 1)     - Sample series (waveform) for AR teacher-forcing in LinearPrediction/Residual/SampleRateNet
                 feat     ::(B, T_frame,  Feat)  - Acoustic feature series for conditioning
-                pitch    ::(B, T_frame,  1)     - Pitch series aligned with `feat`
-                lpcoeffs ::(B, T_frame,  Order) - Linear Prediction coefficients
+                pitch    ::(B, T_frame,  1)     - Pitch series
+                lpcoeffs ::(B, T_frame,  Order) - Linear Prediction coefficient series
             outputs:
                 m_out::()
 
@@ -354,28 +359,33 @@ def new_lpcnet_model(
                 dec_state2 ::(B,           h_GRUb) - Initial hidden state of GRUb
     """
 
+    #### Hardcoded constants ######################################################################
+    size_pitch_codebook, dim_pitch_emb = 256, 64
+    size_fconv_kernel = 3
+    
     #### Inputs ###################################################################################
-    #                    Time, Feat
-    pcm =   Input(shape=(None, 1),                batch_size=batch_size)
-    feat =  Input(shape=(None, nb_used_features), batch_size=batch_size)
-    pitch = Input(shape=(None, 1),                batch_size=batch_size)
+    #                    Time, Feat,                 Batch
+    pcm =   Input(shape=(None, 1),        batch_size=batch_size)
+    feat =  Input(shape=(None, dim_feat), batch_size=batch_size)
+    pitch = Input(shape=(None, 1),        batch_size=batch_size)
 
     #### FrameRateNetwork #########################################################################
-    # Pitch Period embedding: (B, T, 1) -> (B, T, Emb=64) -> (B, T, Emb=64)
-    pembed = Embedding(256, 64, name='embed_pitch')
-    pitch_embedded = Reshape((-1, 64))(pembed(pitch))
+    # Pitch Period embedding: (B, T, 1) -> (B, T, 1, Emb) -> (B, T, Emb)
+    pembed = Embedding(size_pitch_codebook, dim_pitch_emb, name='embed_pitch')
+    pitch_embedded = Reshape((-1, dim_pitch_emb))(pembed(pitch))
 
-    # Concat for network input: ((B, T, Feat=feat), (B, T, Emb=64)) -> (B, T, Feat=feat+64)
+    # Concat for network input: ((B, T, Feat=feat), (B, T, Emb=emb)) -> (B, T, Feat=feat+emb)
     i_cond_net = Concatenate()([feat, pitch_embedded])
 
-    # ConvSegFC: Conv1d_k3cCs1-tanh-Conv1d_k3cCs1-tanh-SegFC_C-tanh-SegFC_C-tanh
+    # ConvSegFC: Conv1d_c/k/s1-tanh-Conv1d_c/k/s1-tanh-SegFC_c-tanh-SegFC_c-tanh
     padding = 'valid' if training else 'same'
-    fconv1 = Conv1D(cond_size, 3, padding=padding, activation='tanh', name='feature_conv1')
-    fconv2 = Conv1D(cond_size, 3, padding=padding, activation='tanh', name='feature_conv2')
-    fdense1 = Dense(cond_size,                     activation='tanh', name='feature_dense1')
-    fdense2 = Dense(cond_size,                     activation='tanh', name='feature_dense2')
-    # Derivatives from original LPCNet: No "residual connection" from @5ae0b07
-    cfeat = fdense2(fdense1(fconv2(fconv1(i_cond_net))))
+    fconv2 = Conv1D(cond_size, size_fconv_kernel, padding=padding, activation='tanh', name='feature_conv2')
+    fconv1 = Conv1D(cond_size, size_fconv_kernel, padding=padding, activation='tanh', name='feature_conv1')
+    fdense1 = Dense(cond_size,                                     activation='tanh', name='feature_dense1')
+    fdense2 = Dense(cond_size,                                     activation='tanh', name='feature_dense2')
+    # Derivatives: Deprecated residual connection (ON @original -> OFF @efficiency, from @5ae0b07)
+    # (B, T_f, Feat=i) -> (B, T_f shorten?, Feat=o)
+    cond_series = fdense2(fdense1(fconv2(fconv1(i_cond_net))))
 
     if flag_e2e and quantize:
         fconv1.trainable = False
@@ -385,36 +395,44 @@ def new_lpcnet_model(
 
     #### Linear Prediction ########################################################################
     if flag_e2e:
-        lpcoeffs = diff_rc2lpc(name = "rc2lpc")(cfeat)
+        lpcoeffs = diff_rc2lpc(name = "rc2lpc")(cond_series)
     else:
-        # Inputs              T_frame,  Order
+        # Inputs              T_frame,  Order                Batch
         lpcoeffs = Input(shape=(None, lpc_order), batch_size=batch_size)
-    error_calc = Lambda(lambda x: tf_l2u(x[0] - tf.roll(x[1],1,axis = 1)))
 
     # Linear Prediction
-    tensor_preds = diff_pred(name = "lpc2preds")([pcm,lpcoeffs])
-    # Residual (μ-law scale)
-    past_errors_ulaw = error_calc([pcm,tensor_preds])
+    predictions = diff_pred(name = "lpc2preds")([pcm,lpcoeffs])
+
+    # Residual
+    #                                       pred_t <- pred_t-1
+    residual_calc = Lambda(lambda x: x[0] - tf.roll(x[1], 1, axis = 1))
+    residual_past = residual_calc([pcm, predictions])
 
     #### SampleRateNetwork ########################################################################
     ###### Embedding #########################################################
-    # s_t-1 `pcm`          ---> μLaw ---.
-    # p_t   `tensor_preds` ---> μLaw ---|---> GaussianNoise -> Embedding -> Reshape -> `i_sample_net_embedded`
-    # e_t-1 `past_errors_ulaw` ---------'
-    cpcm_cat = Concatenate()([tf_l2u(pcm), tf_l2u(tensor_preds), past_errors_ulaw])
-    cpcm_cat = GaussianNoise(.3)(cpcm_cat)
+    # s_t-1 `pcm`           ---> μLaw ---.
+    # p_t   `predictions`   ---> μLaw ---|---> GaussianNoise -> Embedding -> Reshape -> `i_sample_net_embedded`
+    # e_t-1 `residual_past` ---> μLaw ---'
+
+    # ((B, T_s, 1), (B, T_s, 1), (B, T_s, 1)) -> (B, T_s, 3)
+    i_sample_net_cat = Concatenate()([tf_l2u(pcm), tf_l2u(predictions), tf_l2u(residual_past)])
+    # Derivatives: Additional noise (OFF @original -> ON from @5ab3f11)
+    i_sample_net_cat = GaussianNoise(.3)(i_sample_net_cat)
     # Differential embedding for E2E mode (in normal mode, no difference from original LPCNet)
-    embed = diff_Embed(name='embed_sig',initializer = PCMInit())
-    i_sample_net_embedded = Reshape((-1, embed_size*3))(embed(cpcm_cat))
+    embed = diff_Embed(name='embed_sig', initializer = PCMInit())
+    # (B, T_s, 3) -> (B, T_s, 3, Emb=emb) -> (B, T_s, Emb=3*emb)
+    i_sample_net_embedded = Reshape((-1, embed_size*3))(embed(i_sample_net_cat))
 
     ###### Networks ##########################################################
     # Definition of GRU_A `rnn` & GRU_B `rnn2`
     quant = quant_regularizer if quantize else None
     constraint = WeightClip(0.992)
+    # `CuDNNGRU` and `GRU` seems to be layer in TF1.0, but it may not be upgraded because of backward compatibility.
+    #   "以前の keras.layers.CuDNNLSTM/CuDNNGRU レイヤーは使用廃止となったため、実行するハードウェアを気にせずにモデルを構築することができます。" from https://www.tensorflow.org/guide/keras/rnn?hl=ja
+    # Derivatives: State preservation for exposure bias (stateful=False @original -> stateful=True @efficiency)
     if training:
         # [CuDNNGRU](https://www.tensorflow.org/api_docs/python/tf/compat/v1/keras/layers/CuDNNGRU)
         # gru_a: (B, T, F_i) => (B, T, F_o), (B, T, F_h)
-        #   state is preserved between batches.
         #   weight clipping and `quant` is applied on recurrent_kernel.
         rnn = CuDNNGRU(rnn_units1, return_sequences=True, return_state=True, name='gru_a', stateful=True,
               recurrent_constraint = constraint, recurrent_regularizer=quant)
@@ -424,12 +442,12 @@ def new_lpcnet_model(
         rnn2 = CuDNNGRU(rnn_units2, return_sequences=True, return_state=True, name='gru_b', stateful=True,
                kernel_constraint=constraint, recurrent_constraint = constraint, kernel_regularizer=quant, recurrent_regularizer=quant)
     else:
-        # [GRU](https://www.tensorflow.org/api_docs/python/tf/compat/v1/keras/layers/GRU)
+        # [GRU](https://www.tensorflow.org/api_docs/python/tf/keras/layers/GRU)
         # `reset_after` & `recurrent_activation` are for GPU/CUDA compatibility.
-        rnn = GRU(rnn_units1, return_sequences=True, return_state=True, name='gru_a', stateful=True,
+        rnn = GRU(     rnn_units1, return_sequences=True, return_state=True, name='gru_a', stateful=True,
               recurrent_constraint = constraint, recurrent_regularizer=quant,
               recurrent_activation="sigmoid", reset_after='true')
-        rnn2 = GRU(rnn_units2, return_sequences=True, return_state=True, name='gru_b', stateful=True,
+        rnn2 = GRU(     rnn_units2, return_sequences=True, return_state=True, name='gru_b', stateful=True,
               kernel_constraint=constraint, recurrent_constraint = constraint, kernel_regularizer=quant, recurrent_regularizer=quant,
               recurrent_activation="sigmoid", reset_after='true')
 
@@ -438,21 +456,21 @@ def new_lpcnet_model(
 
     md = MDense(pcm_levels, activation='sigmoid', name='dual_fc')
 
-    # rep(cfeat) -----------------------------------------|
+    # rep(cond_series) -----------------------------------|
     #                        |                            | 
     # i_sample_net_embedded ---> `rnn` -> `GaussianNoise` --> `rnn2` -> `md` -> Lambda(_tree_to_pdf_train)
-    rnn_a_in = Concatenate()([i_sample_net_embedded, rep(cfeat)])
+    rnn_a_in = Concatenate()([i_sample_net_embedded, rep(cond_series)])
     gru_out1, _ = rnn(rnn_a_in)
     # Training-specific Noise addition (not described in original LPC?)
     gru_out1 = GaussianNoise(.005)(gru_out1)
-    rnn_b_in = Concatenate()([gru_out1, rep(cfeat)])
+    rnn_b_in = Concatenate()([gru_out1, rep(cond_series)])
     gru_out2, _ = rnn2(rnn_b_in)
 
     # Derivatives from original LPCNet: "binary probability tree" (proposed in `lpcnet_efficiency`) from @d24f49e
     ulaw_prob = Lambda(_tree_to_pdf_train)(md(gru_out2))
 
     # Output#1
-    m_out = Concatenate(name='pdf')([tensor_preds,ulaw_prob])
+    m_out = Concatenate(name='pdf')([predictions, ulaw_prob])
 
     #### Model-nize #################################################################################
     if adaptation:
@@ -465,12 +483,12 @@ def new_lpcnet_model(
     if not flag_e2e:
         model = Model([pcm, feat, pitch, lpcoeffs], m_out)
     else:
-        model = Model([pcm, feat, pitch], [m_out, cfeat])
+        model = Model([pcm, feat, pitch], [m_out, cond_series])
 
     # Register parameters
     model.rnn_units1 = rnn_units1
     model.rnn_units2 = rnn_units2
-    model.nb_used_features = nb_used_features
+    model.nb_used_features = dim_feat
     model.frame_size = frame_size
 
     #### Sub models (separated encoder and decoder) ###############################################
@@ -483,9 +501,9 @@ def new_lpcnet_model(
 
     # Encoder
     if not flag_e2e:
-        encoder = Model([feat, pitch], cfeat)
+        encoder = Model([feat, pitch], cond_series)
     else:
-        encoder = Model([feat, pitch], [cfeat,lpcoeffs])
+        encoder = Model([feat, pitch], [cond_series, lpcoeffs])
 
     # Decoder
     cpcm_decoder = Reshape((-1, embed_size*3))(embed(dpcm))

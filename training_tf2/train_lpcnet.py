@@ -68,7 +68,7 @@ parser.add_argument('--grua-size', metavar='<units>', default=384, type=int, hel
 parser.add_argument('--grub-size', metavar='<units>', default=16, type=int, help='number of units in GRU B (default 16)')
 parser.add_argument('--cond-size', metavar='<units>', default=128, type=int, help='number of units in conditioning network, aka frame rate network (default 128)')
 # Train
-## Derivatives from original LPCNet (120epochs/230Ksteps@original -> 20epochs/767Ksteps@lpcnet_efficiency)
+## In original LPCNet paper, 120 epochs is 230k steps (c.f. 20epochs/767Ksteps@lpcnet_efficiency)
 parser.add_argument('--epochs', metavar='<epochs>', default=120, type=int, help='number of epochs to train for (default 120)')
 ## Derivatives from original LPCNet (64@original -> 128@lpcnet_efficiency):
 parser.add_argument('--batch-size', metavar='<batch size>', default=128, type=int, help='batch size to use (default 128)')

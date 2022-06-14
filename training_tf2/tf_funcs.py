@@ -35,7 +35,7 @@ class diff_pred(Layer):
         """
         Args:
             inputs
-                xt ::(B, T_sample, 1?)    - Sample series (waveform)
+                xt ::(B, T_sample, 1)     - Sample series (waveform)
                 lpc::(B, T_frame,  Order) - Linear prediction coefficients
             lpcoeffs_N - The order of linear prediction (the number of coefficients) ?
         Returns::(B, L, 1)
