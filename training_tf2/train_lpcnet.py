@@ -40,9 +40,12 @@ import h5py
 
 from ulaw import ulaw2lin, lin2ulaw
 from tf_funcs import *
+from tf_funcs import diff_pred
 from lossfuncs import *
+from lossfuncs import metric_cel
 from dataloader import LPCNetLoader
-
+from diffembed import diff_Embed
+from mdense import MDense
 
 #### Args ####################################################################################################################
 parser = argparse.ArgumentParser(description='Train an LPCNet model')
@@ -104,11 +107,13 @@ lpc_order = 16
 #### Model ###################################################################################################################
 ## Training resume
 if args.resume_model is not None:
-    model = keras.models.load_model(args.resume_model)
+    custom_objs = {"diff_pred": diff_pred, "diff_Embed": diff_Embed, "PCMInit": lpcnet.PCMInit, "WeightClip": lpcnet.WeightClip,
+        "MDense": MDense, "metric_cel": metric_cel,}
+    model = keras.models.load_model(args.resume_model, custom_objects=custom_objs)
     print(f"Resumed from Model {args.resume_model}")
-    model.summary()
-    # todo: Check whether `load_model` restore variable in the model (In our case, .frame_size & .nb_used_features)
-    print(f"values from the model: .frame_size={model.frame_size}, .nb_used_features={model.nb_used_features}")
+    # todo: Fix hardcoding
+    model.frame_size=160
+    model.nb_used_features=20
 ## From scratch
 else:
     gamma = 2.0 if args.gamma is None else args.gamma

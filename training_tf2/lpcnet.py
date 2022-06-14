@@ -299,7 +299,7 @@ class PCMInit(Initializer):
 class WeightClip(Constraint):
     '''Clips the weights incident to each hidden unit to be inside a range
     '''
-    def __init__(self, c=2):
+    def __init__(self, c=2, **kwargs):
         self.c = c
 
     def __call__(self, p):
