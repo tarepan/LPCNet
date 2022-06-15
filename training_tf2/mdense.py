@@ -99,9 +99,10 @@ class MDense(Layer):
     @classmethod
     def from_config(cls, config):
         """(TF API) Instantiate this class from serialized config."""
+        # Hack for old broken checkpoints
         units = config.pop("units", None)
         if units is not None:
-            # Hack for old broken checkpoints
+            _ = config.pop("outputs", None)
             return cls(outputs=units, **config)
         else:
             return cls(**config)
