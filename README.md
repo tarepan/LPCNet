@@ -12,8 +12,6 @@ Work in progress software for researching low CPU complexity algorithms for spee
 
 The BSD licensed software is written in C and Python/Keras. For training, a GTX 1080 Ti or better is recommended.
 
-This software is an open source starting point for LPCNet/WaveRNN-based speech synthesis and coding.
-
 ## Inference
 ### Setup
 Following commands build inference program written by C for x86/64 and ARM CPU.  
@@ -84,43 +82,50 @@ Uncompressed analysis/synthesis.
 
 ## Training
 
-This codebase is also meant for research and it is possible to train new models.  
+### 1. Setup
+Set up a Keras system with GPU.
 
-### Steps
-These are the steps to do that:
+### 2. Preprocessing
+Convert input waveforms into preprocessed features.  
 
-1. Set up a Keras system with GPU.
+```bash
+./dump_data -train <input.s16> <features.f32> <data.s16>
+```
 
-1. Generate training data:
-   ```
-   ./dump_data -train input.s16 features.f32 data.s16
-   ```
-   where the first file contains 16 kHz 16-bit raw PCM audio (no header) and the other files are output files. This program makes several passes over the data with different filters to generate a large amount of training data.
+- \<input.s16>: input file containing 16 kHz 16-bit raw PCM audio (no header)
+- \<features.f32>: output file containing ...
+- \<data.s16>: output file containing ...
 
-1. Now that you have your files, train with:
-   ```
-   python3 training_tf2/train_lpcnet.py features.f32 data.s16 model_name
-   ```
-   and it will generate an h5 file for each iteration, with model\_name as prefix. If it stops with a
-   "Failed to allocate RNN reserve space" message try specifying a smaller --batch-size for  train\_lpcnet.py.
+This program makes several passes over the data with different filters to generate a large amount of training data.
 
-1. You can synthesise speech with Python and your GPU card (very slow):
-   ```
-   ./dump_data -test test_input.s16 test_features.f32
-   ./training_tf2/test_lpcnet.py lpcnet_model_name.h5 test_features.f32 test.s16
-   ```
+### 3. Train
+```bash
+python3 training_tf2/train_lpcnet.py <features.f32> <data.s16> <model_name> # --batch-size=32
+```
+and it will generate an h5 file for each iteration, with model\_name as prefix.
 
-1. Or with C on a CPU (C inference is much faster):
-   First extract the model files nnet\_data.h and nnet\_data.c
-   ```
-   ./training_tf2/dump_lpcnet.py lpcnet_model_name.h5
-   ```
-   and move the generated nnet\_data.\* files to the src/ directory.
-   Then you just need to rebuild the software and use lpcnet\_demo as explained above.
+### 4. Evaluation
+#### 4-a. Synthesis on GPU
+※ very slower than CPU
+```bash
+./dump_data -test <test_input.s16> <test_features.f32>
+./training_tf2/test_lpcnet.py <lpcnet_model_name.h5> <test_features.f32> test.s16
+```
+#### 4-b. Synthesis on CPU
+much faster than GPU
 
-### Dataset
+First extract the model files `nnet_data.h` and `nnet_data.c`.  
+```
+./training_tf2/dump_lpcnet.py <lpcnet_model_name.h5>
+mv nnet_data.c nnet_data.h src/
+```
 
-Suitable training material can be obtained from [Open Speech and Language Resources](https://www.openslr.org/).  See the datasets.txt file for details on suitable training data.
+Then follow "inference" section (software rebuild).  
+
+## Dataset
+
+Suitable training material can be obtained from [Open Speech and Language Resources](https://www.openslr.org/).  
+See the datasets.txt file for details on suitable training data.  
 
 ## Reading Further
 
