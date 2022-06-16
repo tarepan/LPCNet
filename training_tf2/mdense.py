@@ -65,7 +65,9 @@ class MDense(Layer):
         output = K.dot(inputs, self.kernel)
         if self.use_bias:
             output = output + self.bias
+        # FC_1 := a_1 ○ tanh(W_1 x), FC_2 := a_2 ○ tanh(W_2 x)
         output = K.tanh(output) * self.factor
+        # dual_fc = FC1 + FC2
         output = K.sum(output, axis=-1)
         if self.activation is not None:
             output = self.activation(output)

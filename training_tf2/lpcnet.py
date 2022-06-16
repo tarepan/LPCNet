@@ -427,19 +427,22 @@ def new_lpcnet_model(
     # Frame repeat :: (B, T_frame, Feat) -> (B, T_sample=T_frame*frame_size, Feat)
     rep = Lambda(lambda x: K.repeat_elements(x, frame_size, 1))
 
+    # P(bit_k|bit_<k), DualFC-sigmoid
     md = MDense(pcm_levels, activation='sigmoid', name='dual_fc')
 
     # rep(cond_series) -----------------------------------|
     #                        |                            | 
-    # i_sample_net_embedded ---> `rnn` -> `GaussianNoise` --> `rnn2` -> `md` -> Lambda(_tree_to_pdf_train)
+    # i_sample_net_embedded ---> `rnn` -> `GaussianNoise` --> `rnn2` -> `md` -> Lambda(tree_to_pdf_train)
     rnn_a_in = Concatenate()([i_sample_net_embedded, rep(cond_series)])
     gru_out1, _ = rnn(rnn_a_in)
     # Training-specific Noise addition (not described in original LPC?)
     gru_out1 = GaussianNoise(.005)(gru_out1)
     rnn_b_in = Concatenate()([gru_out1, rep(cond_series)])
+    # -> (B, T_s, Feat)
     gru_out2, _ = rnn2(rnn_b_in)
 
     # Derivatives from original LPCNet: "binary probability tree" (proposed in `lpcnet_efficiency`) from @d24f49e
+    # (B, T_s, Feat) -> 
     ulaw_prob = Lambda(tree_to_pdf_train)(md(gru_out2))
 
     # Output#1
