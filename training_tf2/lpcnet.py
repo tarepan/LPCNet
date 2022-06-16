@@ -42,38 +42,12 @@ import h5py
 import sys
 from tf_funcs import *
 from diffembed import diff_Embed
+from tree_sampling import tree_to_pdf_train, tree_to_pdf_infer
 
-frame_size = 160 # Waveform samples per acoustic frame [samples/frame]
-pcm_bits = 8
+frame_size = 160         # Waveform samples per acoustic frame [samples/frame]
+pcm_bits = 8             # u-law depth
 embed_size = 128
-pcm_levels = 2**pcm_bits
-
-def _interleave(p, samples):
-    """
-    """
-    p2=tf.expand_dims(p, 3)
-    nb_repeats = pcm_levels//(2*p.shape[2])
-    p3 = tf.reshape(tf.repeat(tf.concat([1-p2, p2], 3), nb_repeats), (-1, samples, pcm_levels))
-    return p3
-
-def _tree_to_pdf(p, samples):
-    """
-    """
-    return _interleave(p[:,:,1:2], samples) * _interleave(p[:,:,2:4], samples) * _interleave(p[:,:,4:8], samples) * _interleave(p[:,:,8:16], samples) \
-         * _interleave(p[:,:,16:32], samples) * _interleave(p[:,:,32:64], samples) * _interleave(p[:,:,64:128], samples) * _interleave(p[:,:,128:256], samples)
-
-def _tree_to_pdf_train(p):
-    """
-    (Local function)
-    """
-    #FIXME: try not to hardcode the 2400 samples (15 frames * 160 samples/frame)
-    return _tree_to_pdf(p, 2400)
-
-def _tree_to_pdf_infer(p):
-    """
-    (Local function)
-    """
-    return _tree_to_pdf(p, 1)
+pcm_levels = 2**pcm_bits # Dynamic range size of u-law
 
 
 def quant_regularizer(x):
@@ -466,7 +440,7 @@ def new_lpcnet_model(
     gru_out2, _ = rnn2(rnn_b_in)
 
     # Derivatives from original LPCNet: "binary probability tree" (proposed in `lpcnet_efficiency`) from @d24f49e
-    ulaw_prob = Lambda(_tree_to_pdf_train)(md(gru_out2))
+    ulaw_prob = Lambda(tree_to_pdf_train)(md(gru_out2))
 
     # Output#1
     m_out = Concatenate(name='pdf')([predictions, ulaw_prob])
@@ -509,7 +483,7 @@ def new_lpcnet_model(
     dec_rnn_in = Concatenate()([cpcm_decoder, dec_feat])
     dec_gru_out1, state1 = rnn(dec_rnn_in, initial_state=dec_state1)
     dec_gru_out2, state2 = rnn2(Concatenate()([dec_gru_out1, dec_feat]), initial_state=dec_state2)
-    dec_ulaw_prob = Lambda(_tree_to_pdf_infer)(md(dec_gru_out2))
+    dec_ulaw_prob = Lambda(tree_to_pdf_infer)(md(dec_gru_out2))
 
     decoder = Model([dpcm, dec_feat, dec_state1, dec_state2], [dec_ulaw_prob, state1, state2])
     ###############################################################################################
