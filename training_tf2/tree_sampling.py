@@ -22,7 +22,7 @@ def _interleave(p, samples: int, pcm_levels: int):
     # 2**(Q-L) =        2**Q // 2**L
     nb_repeats = pcm_levels // (2 * p.shape[2])
     # (B, T_s, Prob=2**(L-1), 1) -> (B, T_s, Prob=2**(L-1), LH=2)
-    low_high = tf.concat([1-p2, p2], 3)
+    low_high = tf.concat([1.0-p2, p2], 3)
     # (B, T_s, Prob=2**(L-1), LH=2) -> (B * T_s * (2**L) * (2**(Q-L)) ,) == (B * T_s * (2**Q),)
     repeated_flatten = tf.repeat(low_high, nb_repeats)
     # (B * T_s * (2**Q),) -> (B, T_s, Prob=2**Q)
