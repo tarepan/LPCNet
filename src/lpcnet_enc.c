@@ -515,6 +515,7 @@ void compute_frame_features(LPCNetEncState *st, const float *in) {
   dct(st->features[st->pcount], Ly);
   st->features[st->pcount][0] -= 4;
   lpc_from_cepstrum(st->lpc, st->features[st->pcount]);
+  // Update i-th order LP coefficient for i in range(LPC_ORDER)
   for (i=0;i<LPC_ORDER;i++) st->features[st->pcount][NB_BANDS+2+i] = st->lpc[i];
   RNN_MOVE(st->exc_buf, &st->exc_buf[FRAME_SIZE], PITCH_MAX_PERIOD);
   RNN_COPY(&aligned_in[TRAINING_OFFSET], in, FRAME_SIZE-TRAINING_OFFSET);
@@ -855,11 +856,11 @@ void process_single_frame(LPCNetEncState *st, FILE *ffeat) {
 /**
  *
  * Args:
- *   y - output preemphasized waveform
- *   mem
- *   x
- *   coef - preemphasis coefficient
- *
+ *   y - Output preemphasized waveform
+ *   mem - memory for first input and next memory
+ *   x - Input linear waveform
+ *   coef - Preemphasis coefficient
+ *   N - Length of samples (`x`)
  */
 void preemphasis(float *y, float *mem, const float *x, float coef, int N) {
   int i;

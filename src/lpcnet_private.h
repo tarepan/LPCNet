@@ -61,7 +61,7 @@ struct LPCNetEncState{
   float lpc[LPC_ORDER];
   float vq_mem[NB_BANDS];
   float features[4][NB_TOTAL_FEATURES];
-  float sig_mem[LPC_ORDER];
+  float sig_mem[LPC_ORDER];                  // samples for Linear Prediction (signal_memory?)
   int exc_mem;
 };
 

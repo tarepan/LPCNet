@@ -43,6 +43,7 @@
 
 
 #define NB_FEATURES 20
+// NB_TOTAL_FEATURES = NB_FEATURES + LPC_ORDER (18 BFCCs + 2 pitches + 16 LPcoeffs)
 #define NB_TOTAL_FEATURES 36
 
 /** Number of bytes in a compressed packet. */
