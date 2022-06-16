@@ -8,7 +8,7 @@ _pcm_bits = 8              # u-law depth
 _pcm_levels = 2**_pcm_bits # Dynamic range size of u-law
 
 
-def _interleave(p, samples: int):
+def _interleave(p, samples: int, pcm_levels: int):
     """
     Args:
         p - Probabilities of Level L
@@ -20,16 +20,16 @@ def _interleave(p, samples: int):
     # (B, T_s, Prob) -> (B, T_s, Prob, 1)
     p2=tf.expand_dims(p, 3)
     # 2**(Q-L) =        2**Q // 2**L
-    nb_repeats = _pcm_levels // (2 * p.shape[2])
+    nb_repeats = pcm_levels // (2 * p.shape[2])
     # (B, T_s, Prob=2**(L-1), 1) -> (B, T_s, Prob=2**(L-1), LH=2)
     low_high = tf.concat([1-p2, p2], 3)
     # (B, T_s, Prob=2**(L-1), LH=2) -> (B * T_s * (2**L) * (2**(Q-L)) ,) == (B * T_s * (2**Q),)
     repeated_flatten = tf.repeat(low_high, nb_repeats)
     # (B * T_s * (2**Q),) -> (B, T_s, Prob=2**Q)
-    p3 = tf.reshape(repeated_flatten, (-1, samples, _pcm_levels))
+    p3 = tf.reshape(repeated_flatten, (-1, samples, pcm_levels))
     return p3
 
-def _tree_to_pdf(p, samples):
+def _tree_to_pdf(p, samples: int, pcm_levels: int):
     """
        P(high)                  P(low)/P(high)              P(level)
     L1        0.6                     0.4/0.6               0.4  0.6  0.4  0.6
@@ -42,12 +42,12 @@ def _tree_to_pdf(p, samples):
         p::(B, T_s, Prob) - Probabilities
     """
     # todo: Remove `_pcm_levels` in `_interleave` after assertion check
-    assert p.shape[2] == _pcm_levels, f"p.shape[2] {p.shape[2]} == _pcm_levels {_pcm_levels}"
+    assert p.shape[2] == pcm_levels, f"p.shape[2] {p.shape[2]} == pcm_levels {pcm_levels}"
     ulaw_level = p.shape[2]
 
     #                    L1=2**0                              L2=2**1                              L3=2**2                               L4=2**3
-    return _interleave(p[:,:, 1: 2], samples) * _interleave(p[:,:, 2: 4], samples) * _interleave(p[:,:, 4:  8], samples) * _interleave(p[:,:,  8: 16], samples) \
-         * _interleave(p[:,:,16:32], samples) * _interleave(p[:,:,32:64], samples) * _interleave(p[:,:,64:128], samples) * _interleave(p[:,:,128:256], samples)
+    return _interleave(p[:,:, 1: 2], samples, pcm_levels) * _interleave(p[:,:, 2: 4], samples, pcm_levels) * _interleave(p[:,:, 4:  8], samples, pcm_levels) * _interleave(p[:,:,  8: 16], samples, pcm_levels) \
+         * _interleave(p[:,:,16:32], samples, pcm_levels) * _interleave(p[:,:,32:64], samples, pcm_levels) * _interleave(p[:,:,64:128], samples, pcm_levels) * _interleave(p[:,:,128:256], samples, pcm_levels)
     #                    L5=2**4                              L6=2**5                              L7=2**6                               L8=2**7
 
     # todo: test refactored
@@ -60,9 +60,9 @@ def tree_to_pdf_train(p):
     """
     """
     #FIXME: try not to hardcode the 2400 samples (15 frames * 160 samples/frame)
-    return _tree_to_pdf(p, 2400)
+    return _tree_to_pdf(p, 2400, _pcm_levels)
 
 def tree_to_pdf_infer(p):
     """
     """
-    return _tree_to_pdf(p, 1)
+    return _tree_to_pdf(p, 1, _pcm_levels)
