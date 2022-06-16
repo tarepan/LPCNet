@@ -45,10 +45,10 @@ def _tree_to_pdf(p, samples: int, pcm_levels: int):
     assert p.shape[2] == pcm_levels, f"p.shape[2] {p.shape[2]} == pcm_levels {pcm_levels}"
     ulaw_level = p.shape[2]
 
-    #                    L1=2**0                              L2=2**1                              L3=2**2                               L4=2**3
+    #                    L1=2**0                                          L2=2**1                                          L3=2**2                                           L4=2**3
     return _interleave(p[:,:, 1: 2], samples, pcm_levels) * _interleave(p[:,:, 2: 4], samples, pcm_levels) * _interleave(p[:,:, 4:  8], samples, pcm_levels) * _interleave(p[:,:,  8: 16], samples, pcm_levels) \
          * _interleave(p[:,:,16:32], samples, pcm_levels) * _interleave(p[:,:,32:64], samples, pcm_levels) * _interleave(p[:,:,64:128], samples, pcm_levels) * _interleave(p[:,:,128:256], samples, pcm_levels)
-    #                    L5=2**4                              L6=2**5                              L7=2**6                               L8=2**7
+    #                    L5=2**4                                          L6=2**5                                          L7=2**6                                           L8=2**7
 
     # todo: test refactored
     # probs = _interleave(p[:,:, 2**(1-1): 2**(1)], samples)
