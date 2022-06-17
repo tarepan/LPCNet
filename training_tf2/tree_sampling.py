@@ -3,67 +3,65 @@
 import tensorflow as tf
 
 
-# Hard-coded constants
-PCM_BITS: int = 8              # u-law depth
-PCM_LEVELS: int = 2**PCM_BITS # Dynamic range size of u-law
-
-
-def _interleave(p: tf.Tensor, samples: int, pcm_levels: int) -> tf.Tensor:
+def _interleave(c_probs: tf.Tensor, len_t: int, num_bits: int, idx_layer: int) -> tf.Tensor:
     """
+    Expand conditional probabilities for joint probability distribution
+
     Args:
-        p - Probabilities of Level L
+        c_probs :: (B, T_s, Cond=2**(k-1)) - B(L_k=1|L_<k=cond) conditional probabilities of all conditions of layer k
+        len_t - Time length of `c_probs`
+        num_bits - The number of sample bits
+        idx_layer - Index number 'k' of the `c_probs` layer
     """
-    # todo: Remove hardcoded values after assertion test
-    # assert p.shape[1] == samples, f"p.shape[1] {p.shape[1]} != samples {samples}"
-    # t_s = p.shape[1]
 
-    # (B, T_s, Prob) -> (B, T_s, Prob, 1)
-    p2=tf.expand_dims(p, 3)
-    # 2**(Q-L) =        2**Q // 2**L
-    nb_repeats = pcm_levels // (2 * p.shape[2])
-    # (B, T_s, Prob=2**(L-1), 1) -> (B, T_s, Prob=2**(L-1), LH=2)
-    low_high = tf.concat([1.0-p2, p2], 3)
-    # (B, T_s, Prob=2**(L-1), LH=2) -> (B * T_s * (2**L) * (2**(Q-L)) ,) == (B * T_s * (2**Q),)
-    repeated_flatten = tf.repeat(low_high, nb_repeats)
-    # (B * T_s * (2**Q),) -> (B, T_s, Prob=2**Q)
-    p3 = tf.reshape(repeated_flatten, (-1, samples, pcm_levels))
-    return p3
+    # Conditional Prob.s to Conditional Prob. distributions
+    #   (B, T_s, Cond) -> (B, T_s, Cond, 1) -> (B, T_s, Cond, Dist=2)
+    c_probs = tf.expand_dims(c_probs, 3)
+    c_prob_dists = tf.concat([1.0-c_probs, c_probs], 3)
+    #                        [B(Lk=0|.)  B(Lk=1|.)]
 
-def _tree_to_pdf(p: tf.Tensor, samples: int, pcm_levels: int) -> tf.Tensor:
+    # Expand for joint distribution
+    #   (B, T_s, Cond=2**(k-1), Dist=2) -> (B * T_s * (2**(k-1)) * 2 * (2**(Q-L)) ,) == (B * T_s * (2**Q),) -> (B, T_s, Dist=2**Q)
+    # x2 conditions per bit layer
+    nb_repeats = 2 ** (num_bits - idx_layer)
+    repeated_flatten = tf.repeat(c_prob_dists, nb_repeats)
+    c_prob_dists_expanded = tf.reshape(repeated_flatten, (-1, len_t, 2**num_bits))
+    return c_prob_dists_expanded
+
+
+def _tree_to_pdf(p: tf.Tensor, len_t: int, pcm_bits: int) -> tf.Tensor:
     """
-       P(high)                  P(low)/P(high)              P(level)
+    Convert Hierarchical conditional bit probabilities to the joint level probability.
+
+         B(Lk=1|L<k)     B(Lk=0|L<k=Bs<k)/B(Lk=1|L<k=Bs<k)      P(level)
     L1        0.6                     0.4/0.6               0.4  0.6  0.4  0.6
             /     \                                          x    x    x    x
     L2    0.1     0.7      =>    0.9/0.1   0.3/0.7    =>    0.9  0.1  0.3  0.7
          .   .   .   .
-        .36/.04/.18/.42                                     0.36 0.04 0.18 0.42
+    P(s).36/.04/.18/.42                                     0.36 0.04 0.18 0.42
 
     Args:
-        p::(B, T_s, Prob) - Probabilities
+        p ::(B, T_s, Prob) - Hierarchical conditional bit probabilities
+        len_t              - Time length of `p`
+        pcm_bits           - The number of sample bits
+    Returns :: (B, T_s, Prob) - Joint probability distribution of all bits == PD of level
     """
     # todo: Remove `_pcm_levels` in `_interleave` after assertion check
     # assert p.shape[2] == pcm_levels, f"p.shape[2] {p.shape[2]} == pcm_levels {pcm_levels}"
     # ulaw_level = p.shape[2]
 
-    #                    L1=2**0                                          L2=2**1                                          L3=2**2                                           L4=2**3
-    return _interleave(p[:,:, 1: 2], samples, pcm_levels) * _interleave(p[:,:, 2: 4], samples, pcm_levels) * _interleave(p[:,:, 4:  8], samples, pcm_levels) * _interleave(p[:,:,  8: 16], samples, pcm_levels) \
-         * _interleave(p[:,:,16:32], samples, pcm_levels) * _interleave(p[:,:,32:64], samples, pcm_levels) * _interleave(p[:,:,64:128], samples, pcm_levels) * _interleave(p[:,:,128:256], samples, pcm_levels)
-    #                    L5=2**4                                          L6=2**5                                          L7=2**6                                           L8=2**7
+    # todo: Remove hardcoded values after assertion test
+    # assert p.shape[1] == samples, f"p.shape[1] {p.shape[1]} != samples {samples}"
 
-    # todo: test refactored
-    # Probability Distribution == Π P(bit_k|bit_<k)
-    # prob_dist = _interleave(p[:,:, 2**(1-1): 2**(1)], samples, pcm_levels)
-    # for l in range(2, 9):
-    #     prob_dist = prob_dist * _interleave(p[:,:, 2**(l-1) : 2**l], samples, pcm_levels)
-    # return prob_dist
+    # # Time Length
+    # len_t = c_probs.shape[1]
 
-def tree_to_pdf_train(p: tf.Tensor) -> tf.Tensor:
-    """
-    """
-    #FIXME: try not to hardcode the 2400 samples (15 frames * 160 samples/frame)
-    return _tree_to_pdf(p, 2400, PCM_LEVELS)
+    # Joint Probability Distribution == Π P(L_k|L_<k)
+    prob_dist = _interleave(p[:,:, 2**(1-1): 2**(1)], len_t, pcm_bits, 1)
+    for l in range(2, pcm_bits + 1):
+        prob_dist = prob_dist * _interleave(p[:,:, 2**(l-1) : 2**l], len_t, pcm_bits, l)
+    return prob_dist
 
-def tree_to_pdf_infer(p: tf.Tensor) -> tf.Tensor:
-    """
-    """
-    return _tree_to_pdf(p, 1, PCM_LEVELS)
+
+def gen_tree_to_pdf(len_t: int, pcm_bits: int):
+    return lambda p: _tree_to_pdf(p, len_t, pcm_bits)

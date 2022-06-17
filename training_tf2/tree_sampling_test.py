@@ -11,7 +11,6 @@ def test_interleave():
     # batch_size = 2
     t_sample = 3
     bit_depth = 3
-    _pcm_levels = 2**bit_depth
 
     # P(bit_k|bit_<k)
     bit_cond_probs: tf.Tensor = tf.constant([
@@ -50,6 +49,39 @@ def test_interleave():
         ],
     ], dtype=tf.float64)
 
-    l3_cond_probs = _interleave(l3, t_sample, _pcm_levels)
+    l3_cond_probs = _interleave(l3, t_sample, bit_depth, layer)
 
     assert True == tf.reduce_all(tf.equal(l3_cond_probs, l3_gt)).numpy().item()
+
+
+def test_tree_to_pdf():
+
+    t_sample = 1
+    bit_depth = 3
+
+    # P(bit_k|bit_<k) :: (B=1, T_s=1, Cond=2**3)
+    bit_cond_probs_all: tf.Tensor = tf.constant([
+        [ # batch_1
+            [1.0, 0.3, 0.4, 0.5, 0.1, 0.2, 0.3, 0.4,], # t_0
+        #   | - | L1 |    L2   |        L3         |
+        ],
+    ], dtype=tf.float64)
+
+    # P(level) :: (B=1, T_s=1, Dist=2**3)
+    joint_dist_gt: tf.Tensor = tf.constant([
+        [ # batch_0
+            [ # time_0
+                (1.0-0.3) * (1.0-0.4) * (1.0-0.1), # 000
+                (1.0-0.3) * (1.0-0.4) *      0.1 , # 001
+                (1.0-0.3) *      0.4  * (1.0-0.2), # 010
+                (1.0-0.3) *      0.4  *      0.2 , # 011
+                     0.3  * (1.0-0.5) * (1.0-0.3), # 100
+                     0.3  * (1.0-0.5) *      0.3 , # 101
+                     0.3  *      0.5  * (1.0-0.4), # 110
+                     0.3  *      0.5  *      0.4 , # 111
+        ],
+    ]], dtype=tf.float64)
+
+    joint_dist_estim = _tree_to_pdf(bit_cond_probs_all, t_sample, bit_depth)
+
+    assert True == tf.reduce_all(tf.equal(joint_dist_estim, joint_dist_gt)).numpy().item()
