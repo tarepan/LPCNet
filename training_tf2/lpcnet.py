@@ -317,12 +317,13 @@ def new_lpcnet_model(
     Returns:
         model - Whole model for joint Encoder-Decoder (e.g. for training)
             inputs:
-                pcm      ::(B, T_sample, 1)     - Sample series (waveform) for AR teacher-forcing in LinearPrediction/Residual/SampleRateNet
-                feat     ::(B, T_frame,  Feat)  - Acoustic feature series for conditioning
-                pitch    ::(B, T_frame,  1)     - Pitch series
-                lpcoeffs ::(B, T_frame,  Order) - Linear Prediction coefficient series
+                s_t_1_series   ::(B, T_s, 1)      - Lagged/Delayed sample series (waveform)
+                feat_series    ::(B, T_f, Feat)   - Acoustic feature series
+                pitch_series   ::(B, T_f, 1)      - Pitch series
+                lpcoeff_series ::(B, T_f, Order)  - Linear Prediction coefficient series, for default (non-E2E)
             outputs:
-                m_out::()
+                o_t_series     ::(B, T_s, 1+Dist) - Series of p_t and P(e_t)
+                cond_series    ::(B, T_f, Feat)   - Condition series, for E2E regularization
 
         encoder - FrameRateNetwork/Encoder  sub model for separated enc/dec (e.g. for compression)
         decoder - SampleRateNetwork/Decoder sub model for separated enc/dec (e.g. for compression)
@@ -334,33 +335,35 @@ def new_lpcnet_model(
     """
 
     #### Hardcoded constants ######################################################################
-    size_pitch_codebook, dim_pitch_emb = 256, 64
-    size_fconv_kernel = 3
+    SIZE_PITCH_CODEBOOK, DIM_PITCH_EMB = 256, 64
+    SIZE_FCONV_KERNEL = 3
     
     #### Inputs ###################################################################################
-    #                    Time, Feat,                 Batch
-    pcm =   Input(shape=(None, 1),        batch_size=batch_size)
-    feat =  Input(shape=(None, dim_feat), batch_size=batch_size)
-    pitch = Input(shape=(None, 1),        batch_size=batch_size)
+    #                           Time, Feat,                 Batch
+    s_t_1_series = Input(shape=(None, 1),        batch_size=batch_size)
+    feat_series  = Input(shape=(None, dim_feat), batch_size=batch_size)
+    pitch_series = Input(shape=(None, 1),        batch_size=batch_size)
 
     #### FrameRateNetwork #########################################################################
-    # Pitch Period embedding: (B, T, 1) -> (B, T, 1, Emb) -> (B, T, Emb)
-    pembed = Embedding(size_pitch_codebook, dim_pitch_emb, name='embed_pitch')
-    pitch_embedded = Reshape((-1, dim_pitch_emb))(pembed(pitch))
+    # Pitch Period embedding: (B, T_f, 1) -> (B, T_f, 1, Emb) -> (B, T_f, Emb)
+    pembed = Embedding(SIZE_PITCH_CODEBOOK, DIM_PITCH_EMB, name='embed_pitch')
+    pitch_embedded = Reshape((-1, DIM_PITCH_EMB))(pembed(pitch_series))
 
-    # Concat for network input: ((B, T, Feat=feat), (B, T, Emb=emb)) -> (B, T, Feat=feat+emb)
-    i_cond_net = Concatenate()([feat, pitch_embedded])
+    # Concat for network input: ((B, T_f, Feat=feat), (B, T_f, Emb=emb)) -> (B, T_f, Feat=feat+emb)
+    i_cond_net_series = Concatenate()([feat_series, pitch_embedded])
 
     # ConvSegFC: Conv1d_c/k/s1-tanh-Conv1d_c/k/s1-tanh-SegFC_c-tanh-SegFC_c-tanh
+    # todo: why valid?
     padding = 'valid' if training else 'same'
-    fconv2 = Conv1D(cond_size, size_fconv_kernel, padding=padding, activation='tanh', name='feature_conv2')
-    fconv1 = Conv1D(cond_size, size_fconv_kernel, padding=padding, activation='tanh', name='feature_conv1')
+    fconv2 = Conv1D(cond_size, SIZE_FCONV_KERNEL, padding=padding, activation='tanh', name='feature_conv2')
+    fconv1 = Conv1D(cond_size, SIZE_FCONV_KERNEL, padding=padding, activation='tanh', name='feature_conv1')
     fdense1 = Dense(cond_size,                                     activation='tanh', name='feature_dense1')
     fdense2 = Dense(cond_size,                                     activation='tanh', name='feature_dense2')
     # Derivatives: Deprecated residual connection (ON @original -> OFF @efficiency, from @5ae0b07)
     # (B, T_f, Feat=i) -> (B, T_f shorten?, Feat=o)
-    cond_series = fdense2(fdense1(fconv2(fconv1(i_cond_net))))
+    cond_series = fdense2(fdense1(fconv2(fconv1(i_cond_net_series))))
 
+    # todo: when to `quantize`
     if flag_e2e and quantize:
         fconv1.trainable = False
         fconv2.trainable = False
@@ -368,28 +371,33 @@ def new_lpcnet_model(
         fdense2.trainable = False
 
     #### Linear Prediction ########################################################################
+    # LP coefficinets
+    ## E2E: RC_in_Cond-to-LPC forward
     if flag_e2e:
-        lpcoeffs = diff_rc2lpc(name = "rc2lpc")(cond_series)
+        # (B, T_f shorten?, Feat=RC+α) -> (B, T_f, Order)
+        lpcoeff_series = diff_rc2lpc(name = "rc2lpc")(cond_series)
+    ## Defalt: Input
     else:
-        # Inputs              T_frame,  Order                Batch
-        lpcoeffs = Input(shape=(None, lpc_order), batch_size=batch_size)
+        # Inputs                       T_f,     Order              Batch
+        lpcoeff_series = Input(shape=(None, lpc_order), batch_size=batch_size)
 
-    # p_series_noisy - Linear Prediction -> (B, T_s, 1)
-    predictions = diff_pred(name = "lpc2preds")([pcm, lpcoeffs])
+    # Linear Prediction
+    # ((B, T_s, 1), (B, T_f, Order)) -> (B, T_s, 1)
+    p_t_series = diff_pred(name = "lpc2preds")([s_t_1_series, lpcoeff_series])
 
     # Residual
-    #                                       pred_t <- pred_t-1
-    residual_calc = Lambda(lambda x: x[0] - tf.roll(x[1], 1, axis = 1))
-    residual_past = residual_calc([pcm, predictions])
+    #                        s_t_1_series - p_t_1_series (1 sample lagged)
+    residual_past = Lambda(lambda x: x[0] - tf.roll(x[1], 1, axis = 1))
+    e_t_1_series = residual_past([s_t_1_series, p_t_series])
 
     #### SampleRateNetwork ########################################################################
     ###### Embedding #########################################################
-    # s_t-1 `pcm`           ---> μLaw ---.
-    # p_t   `predictions`   ---> μLaw ---|---> GaussianNoise -> Embedding -> Reshape -> `i_sample_net_embedded`
-    # e_t-1 `residual_past` ---> μLaw ---'
+    # s_{t-1} ---> μLaw ---.
+    # p_t     ---> μLaw ---|---> GaussianNoise -> Embedding -> Reshape -> `i_sample_net_embedded`
+    # e_{t-1} ---> μLaw ---'
 
     # ((B, T_s, 1), (B, T_s, 1), (B, T_s, 1)) -> (B, T_s, 3)
-    i_sample_net_cat = Concatenate()([tf_l2u(pcm), tf_l2u(predictions), tf_l2u(residual_past)])
+    i_sample_net_cat = Concatenate()([tf_l2u(s_t_1_series), tf_l2u(p_t_series), tf_l2u(e_t_1_series)])
     # Derivatives: Additional noise (OFF @original -> ON from @5ab3f11)
     i_sample_net_cat = GaussianNoise(.3)(i_sample_net_cat)
     # Differential embedding for E2E mode (in normal mode, no difference from original LPCNet)
@@ -406,11 +414,11 @@ def new_lpcnet_model(
     # Derivatives: State preservation for exposure bias (stateful=False @original -> stateful=True @efficiency)
     if training:
         # [CuDNNGRU](https://www.tensorflow.org/api_docs/python/tf/compat/v1/keras/layers/CuDNNGRU)
-        # gru_a: (B, T, F_i) => (B, T, F_o), (B, T, F_h)
+        # gru_a: (B, T_s, Feat=i) => (B, T_s, Feat=o), (B, T_s, Feat=h)
         #   weight clipping and `quant` is applied on recurrent_kernel.
         rnn = CuDNNGRU(rnn_units1, return_sequences=True, return_state=True, name='gru_a', stateful=True,
               recurrent_constraint = constraint, recurrent_regularizer=quant)
-        # gru_b: (B, T, F_i) => (B, T, F_o), (B, T, F_h)
+        # gru_b: (B, T_s, Feat=i) => (B, T_s, Feat=o), (B, T_s, Feat=h)
         #   state is preserved between batches.
         #   weight clipping and `quant` is applied on both recurrent_kernel and kernel.
         rnn2 = CuDNNGRU(rnn_units2, return_sequences=True, return_state=True, name='gru_b', stateful=True,
@@ -425,15 +433,15 @@ def new_lpcnet_model(
               kernel_constraint=constraint, recurrent_constraint = constraint, kernel_regularizer=quant, recurrent_regularizer=quant,
               recurrent_activation="sigmoid", reset_after='true')
 
-    # Frame repeat :: (B, T_frame, Feat) -> (B, T_sample=T_frame*frame_size, Feat)
+    # Frame repeat :: (B, T_f, Feat) -> (B, T_s==T_f*frame_size, Feat)
     rep = Lambda(lambda x: K.repeat_elements(x, frame_size, 1))
 
-    # P(bit_k|bit_<k), DualFC-sigmoid
+    # B(l_k=1|l_<k), DualFC-sigmoid
     md = MDense(pcm_levels, activation='sigmoid', name='dual_fc')
 
-    # rep(cond_series) -----------------------------------|
-    #                        |                            | 
-    # i_sample_net_embedded ---> `rnn` -> `GaussianNoise` --> `rnn2` -> `md` -> Lambda(tree_to_pdf_train)
+    # rep(cond_series) ------------------------------------.
+    #                        |                             | 
+    # i_sample_net_embedded ---> `rnn` -> `GaussianNoise` ---> `rnn2` -> `md` -> Lambda(tree_to_pdf_train)
     rnn_a_in = Concatenate()([i_sample_net_embedded, rep(cond_series)])
     gru_out1, _ = rnn(rnn_a_in)
     # Training-specific Noise addition (not described in original LPC?)
@@ -445,12 +453,12 @@ def new_lpcnet_model(
     # Derivatives: Hierarchical Probability Distribution (proposed in `lpcnet_efficiency`, from @d24f49e)
     # (B, T_s, Feat) -> (B, T_s, Prob=2**Q)
     bit_cond_probs = md(gru_out2)
-    # (B, T_s, Prob=2**Q) -> (B, T_s, Prob=2**Q)
+    # P(e_t) series :: (B, T_s, Prob=2**Q) -> (B, T_s, Dist=2**Q)
+    e_t_pd_series = Lambda(gen_tree_to_pdf(2400, pcm_bits))(bit_cond_probs)
     #FIXME: try not to hardcode the 2400 samples (15 frames * 160 samples/frame)
-    ulaw_prob = Lambda(gen_tree_to_pdf(2400, pcm_bits))(bit_cond_probs)
 
-    # ((B, T_s, 1), (B, T_s, Prob=2**Q)) -> (B, T_s, 1+2**Q)
-    m_out = Concatenate(name='pdf')([predictions, ulaw_prob])
+    # Series of p_t and P(e_t) :: ((B, T_s, 1), (B, T_s, Dist)) -> (B, T_s, 1+Dist)
+    o_t_series = Concatenate(name='pdf')([p_t_series, e_t_pd_series])
 
     #### Model-nize #################################################################################
     if adaptation:
@@ -460,10 +468,14 @@ def new_lpcnet_model(
         embed.Trainable=False
 
     # The whole model
+    ## Default
     if not flag_e2e:
-        model = Model([pcm, feat, pitch, lpcoeffs], m_out)
+        model = Model([s_t_1_series, feat_series, pitch_series, lpcoeff_series], o_t_series)
+    ## E2E
     else:
-        model = Model([pcm, feat, pitch], [m_out, cond_series])
+        # w/o explicit LP coefficient input
+        # w/ conditioning series output for regularization
+        model = Model([s_t_1_series, feat_series, pitch_series], [o_t_series, cond_series])
 
     # Register parameters
     model.rnn_units1 = rnn_units1
@@ -481,9 +493,9 @@ def new_lpcnet_model(
 
     # Encoder
     if not flag_e2e:
-        encoder = Model([feat, pitch], cond_series)
+        encoder = Model([feat_series, pitch_series], cond_series)
     else:
-        encoder = Model([feat, pitch], [cond_series, lpcoeffs])
+        encoder = Model([feat_series, pitch_series], [cond_series, lpcoeff_series])
 
     # Decoder
     cpcm_decoder = Reshape((-1, embed_size*3))(embed(dpcm))

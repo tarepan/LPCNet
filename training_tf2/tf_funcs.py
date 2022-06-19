@@ -27,32 +27,58 @@ def tf_u2l(u):
     u = K.abs(u)
     return s*scale_1*(K.exp(u/128.*K.log(256.0))-1)
 
-# Differentiable Prediction Layer
-# Computes the LP prediction from the input lag signal and the LP coefficients
-# The inputs xt and lpc conform with the shapes in lpcnet.py (the '2400' is coded keeping this in mind)
+
 class diff_pred(Layer):
+    """Differentiable Linear Prediction, p_t = a1 * s_{t-1} + ..."""
     def call(self, inputs, lpcoeffs_N: int = 16, frame_size: int = 160):
         """
         Args:
             inputs
-                xt ::(B, T_sample, 1)     - Sample series (waveform)
-                lpc::(B, T_frame,  Order) - Linear prediction coefficients
+                s_t_1_series ::(B, T_s, 1)     - Sample series (waveform), 1 sample lagged/delayed
+                coeff_series ::(B, T_f, Order) - Linear prediction coefficients
             lpcoeffs_N - The order of linear prediction (the number of coefficients) ?
-        Returns::(B, L, 1)
+        Returns::(B, L, 1) - p_t_series
         """
-        xt = inputs[0]
-        lpc = inputs[1]
+        s_t_1_series = inputs[0]
+        coeff_series = inputs[1]
+        LENGTH_T: int = 2400
 
-        # Repeat LP coefficients :: (B, T_frame, Order) -> (B, T_sample=T_frame*frame_size, Order)
+        # Repeat LP coefficients :: (B, T_f, Order) -> (B, T_s==T_f*frame_size, Order)
         rept = Lambda(lambda x: K.repeat_elements(x , frame_size, 1))
-        # Zero padding at head (maybe)
-        zpX = Lambda(lambda x: K.concatenate([0*x[:,0:lpcoeffs_N,:], x],axis = 1))
-        # concat [B, Order-0:L-0, 1], [B, Order-1:L-1, 1], [B, Order-2:L-2, 1] ... [B, 1:L-Order+1, 1] -> (B, L, Order)
-        cX = Lambda(lambda x: K.concatenate([x[:,(lpcoeffs_N - i):(lpcoeffs_N - i + 2400),:] for i in range(lpcoeffs_N)],axis = 2))
-        
-        pred = -Multiply()([rept(lpc),cX(zpX(xt))])
 
-        return K.sum(pred,axis = 2,keepdims = True)
+        """
+        [I/O]
+            Input:  s_t_1_series    s0  s1 ...
+            Output  p_t_series      p1  p2 ...
+
+        [LP by Lagged series sum]
+            s_t_16_series    0   0 ...   0   s0
+            ...
+            s_t_2_series     0  s0 ... s13  s14
+            s_t_1_series    s0  s1 ... s14  s15
+           -------------------------------------
+            p_t_series      p1  p2 ... p15  p16
+        """
+        # Series of LP value pack (s_{t-1}, s_{t-2}, ..., s_{t-16})
+        ## Zero padding :: (B, T_s=L, 1) -> (B, T_s=Order+L, 1), #0 ~ #{Order-1} is zero, #Order is s0
+        zpX = Lambda(lambda x: K.concatenate([0*x[:, 0:lpcoeffs_N, :], x],axis = 1))
+        ## sample series to value pack series
+        #   (B, T_s=Order+L, 1) -> (B, T_{t-i}=L, 1) for (1, ..., Order) -> (B, T_s=L, Order)
+        cX = Lambda((lambda x: K.concatenate(
+            ### Prepare lagged series, [:, Order-0:..., :] is equal to `s_t_1_series`
+            [x[:, (lpcoeffs_N - i) : (lpcoeffs_N - i + LENGTH_T), :] for i in range(lpcoeffs_N)],
+            ### Concat as value pack
+            axis = 2
+        )))
+
+        # Linear Prediction
+        ## a_i*s_{t-i} for all t & i :: (B, T_s, Order) -> (B, T_s, Order)
+        p_t_elem_series = -Multiply()([rept(coeff_series), cX(zpX(s_t_1_series))])
+        # p_t = Σi=1 (a_i*s_{t-i}) :: (B, T_s, Order) -> (B, T_s, 1)
+        p_t_series = K.sum(p_t_elem_series,axis = 2,keepdims = True)
+
+        return p_t_series
+
 
 # Differentiable Transformations (RC <-> LPC) computed using the Levinson Durbin Recursion 
 class diff_rc2lpc(Layer):
