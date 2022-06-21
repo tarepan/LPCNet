@@ -67,17 +67,32 @@ def metric_icel(y_true, y_pred):
     sparse_cel = tf.keras.losses.SparseCategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE)(e_gt,interp_probab)
     return sparse_cel
 
-# Non-interpolated (rounded) cross entropy loss metric
-def metric_cel(y_true, y_pred):
-    y_true = tf.cast(y_true, 'float32')
-    p = y_pred[:,:,0:1]
-    model_out = y_pred[:,:,1:]
-    e_gt = tf_l2u(y_true - p)
-    e_gt = tf.round(e_gt)
-    e_gt = tf.cast(e_gt,'int32')
-    e_gt = tf.clip_by_value(e_gt,0,255) 
-    sparse_cel = tf.keras.losses.SparseCategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE)(e_gt,model_out)
+
+def metric_cel(y_t_true, y_t_pred):
+    """
+    Distance between e_t_ideal one-hot and e_t_estim dist, CrossEntropy loss.
+    Non-interpolated (rounded)
+
+    Args:
+        y_t_true ::(B, T_s, 1)      - Ground truth s_t_clean series
+        y_t_pred ::(B, T_s, 1+2**Q) - LP noisy series and residual Dist series
+    """
+    # Sample series, clean :: (B, T_s, 1)
+    s_t_clean_series = tf.cast(y_t_true, "float32")
+    # Prediction from noisy samples :: (B, T_s, 1)
+    p_t_noisy_series = y_t_pred[:, :, 0:1]
+    # Probability Distribution series of estimated residual :: (B, T_s, PD=2**Q)
+    e_t_series_estim_dist = y_t_pred[:, :, 1:]
+
+    # μ-law value series of idead residual under noisy AR :: (B, T_s, 1)
+    e_t_series_ideal = tf_l2u(s_t_clean_series - p_t_noisy_series)
+    e_t_series_ideal = tf.round(e_t_series_ideal)
+    e_t_series_ideal = tf.cast(e_t_series_ideal, 'int32')
+    e_t_series_ideal = tf.clip_by_value(e_t_series_ideal, 0, 255)
+
+    sparse_cel = tf.keras.losses.SparseCategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE)(e_t_series_ideal, e_t_series_estim_dist)
     return sparse_cel
+
 
 # Variance metric of the output excitation
 def metric_exc_sd(y_true,y_pred):

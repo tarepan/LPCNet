@@ -26,19 +26,15 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 '''
 
-import sys
 import argparse
 from typing import Tuple
 
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
-import tensorflow.keras.backend as K
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger
-import h5py
 
-from ulaw import ulaw2lin, lin2ulaw
 from tf_funcs import *
 from tf_funcs import diff_pred
 from lossfuncs import *
@@ -101,7 +97,7 @@ batch_size = args.batch_size
 quantize = args.quantize is not None
 retrain = args.retrain is not None
 flag_e2e = args.flag_e2e
-lpc_order = 16
+ORDER_LPC: int = 16
 
 
 #### Model ###################################################################################################################
@@ -134,6 +130,7 @@ else:
             model.compile(optimizer=opt, loss=metric_cel, metrics=metric_cel)
         else:
             model.compile(optimizer=opt, loss = [interp_mulaw(gamma=gamma), loss_matchlar()], loss_weights = [1.0, 2.0], metrics={'pdf':[metric_cel,metric_icel,metric_exc_sd,metric_oginterploss]})
+
         # Report model architecture
         model.summary()
 
@@ -144,44 +141,48 @@ if quantize or retrain:
 
 
 #### Data ####################################################################################################################
+# Loading and shaping for LPCNet (e.g. clip for valid Conv)
+
 sample_per_frame = model.frame_size                  # Waveform samples per acoustic frame [samples/frame]
-nb_used_features = model.nb_used_features            # Feature dim size of `feat`, which is used as direct input to FrameRateNetwork
+dim_feat = model.nb_used_features                    # Feature dim size of `feat`, which is used as direct input to FrameRateNetwork
 frame_per_chunk = 15                                 # (maybe) The number of frames per chunk (item)
 sample_per_chunk = sample_per_frame*frame_per_chunk  # (maybe) The number of samples per chunk (item)
 # u for unquantised, load 16 bit PCM samples and convert to mu-law
 
 # np.memmap for partial access to single big file
 ## all-utterance file (<data.s16>, 16 bit unsigned short PCM samples)
-samples = np.memmap(args.data, dtype='int16', mode='r')
-## all-feature (acoustic features and pitchs) file (<features.f32>)
-features = np.memmap(args.features, dtype='float32', mode='r')
+s_t_1_s_t_series = np.memmap(args.data, dtype='int16', mode='r')
+## Contents of feature file (<features.f32>), containing acoustic feature series and LP coefficient series
+feat_lpc_series_linearized = np.memmap(args.features, dtype='float32', mode='r')
 
-# The number of chunks in <data.s16> (variable naming is wrong...?)
-nb_frames = (len(samples)//(2*sample_per_chunk)-1)//batch_size*batch_size
+# The number of chunks in <data.s16>
+num_chunk = (len(s_t_1_s_t_series)//(2*sample_per_chunk) -1) //batch_size*batch_size
+## Why -1? For look-ahead clipping?
 
 #### Samples ####
-# Discard head samples
-samples = samples[(4-args.lookahead)*2*sample_per_frame:]
+# Discard look aheads samples         [frame]          * [samples/frame]  * I/O
+s_t_1_s_t_series = s_t_1_s_t_series[(4-args.lookahead) * sample_per_frame * 2:]
 # Discard chippings
-samples = samples[:nb_frames*2*sample_per_chunk]
-# samples :: (Chunk, T_sample, IO=2)
-samples = np.reshape(samples, (nb_frames, sample_per_chunk, 2))
+s_t_1_s_t_series = s_t_1_s_t_series[:num_chunk * sample_per_chunk * 2]
+# Input s_{t-1} series and Target s_t series :: (Chunk, T_s, IO=2)
+s_t_1_s_t_series = np.reshape(s_t_1_s_t_series, (num_chunk, sample_per_chunk, 2))
 
 #### Acoustic Feature series and LP coefficient series ####
-sizeof = features.strides[-1]
-nb_features = nb_used_features + lpc_order # Feature dim size of <features.f32>, equal to `dim_feat + order_lpc`
-# features :: (Chunk, )
-features = np.lib.stride_tricks.as_strided(features, shape=(nb_frames, frame_per_chunk+4, nb_features),
-                                           strides=(frame_per_chunk*nb_features*sizeof, nb_features*sizeof, sizeof))
-#features = features[:, :, :nb_used_features]
+dim_feat_lpc = dim_feat + ORDER_LPC
+byte_value = feat_lpc_series_linearized.strides[-1]
+byte_frame = dim_feat_lpc * byte_value
+byte_chunk = frame_per_chunk * byte_frame
+# ::(Chunk, t_f+4, Feat+Order), +4 maybe for 'valid' Conv
+feat_lpc_series = np.lib.stride_tricks.as_strided(feat_lpc_series_linearized, shape=(num_chunk, frame_per_chunk+4, dim_feat_lpc),
+                                           strides=(byte_chunk, byte_frame, byte_value))
 
 #### Pitch Period series ####
-# idx=-1 is Pitch Correlation series, idx=-2 is Pitch Period series (maybe)
-periods = (.1 + 50*features[:,:,nb_used_features-2:nb_used_features-1]+100).astype("int16")
+# feat_series[:,:,-1] is Pitch Correlation series, feat_series[:,:,-2] is Pitch Period series (※ feat_series != feat_lpc_series)
+periods = (.1 + 50*feat_lpc_series[:, :, dim_feat-2:dim_feat-1]+100).astype("int16")
 #periods = np.minimum(periods, 255)
 
 # Construct data loader
-loader = LPCNetLoader(samples, features, periods, batch_size, e2e=flag_e2e)
+loader = LPCNetLoader(s_t_1_s_t_series, feat_lpc_series, periods, batch_size, e2e=flag_e2e)
 
 
 #### Sparsification and Quantization #########################################################################################
