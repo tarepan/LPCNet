@@ -98,47 +98,69 @@ static short float2short(float x)
 
 
 /**
+ * Write sample series to the file with noise addition.
  *
  * Args:
- *   pcm - PCM sample series (waveform)
+ *   st - State containing 'frame feature' and 'samples over loop'
+ *   s_t_clean - Sample t series (waveform) without noise
  *   noise - Noise series for argumentation of training sample series
- *   file - Output file
+ *   file - File pointer of output
+ *   nframes - The number of frames which `s_t_clean` and `noise` chunks contain
  */
-void write_audio(LPCNetEncState *st, const short *pcm, const int *noise, FILE *file, int nframes) {
-  int i, k;
-  for (k=0;k<nframes;k++) {
-    // [s_1, s_1', s_2, s_2', ..., s_FRAME_SIZE, s_FRAME_SIZE']
-    short data[2*FRAME_SIZE]; // Write buffer
-    for (i=0;i<FRAME_SIZE;i++) {
-      float p=0; // p_t - Prediction
-      int j;     // Prediction index
-      float e;   // e_t - Residual
-      // p_t                         BFCC+pitchs+LPcoeff_j
-      for (j=0;j<LPC_ORDER;j++) p -= st->features[k][NB_BANDS+2+j] * st->sig_mem[j];
-      // e_t =     s_t_clean           - p_t_?
-      e = lin2ulaw(pcm[k*FRAME_SIZE+i] - p);
-      /* Signal in:  sample w/  noise */
-      data[2*i] = float2short(st->sig_mem[0]);
-      /* Signal out: sample w/o noise */
-      data[2*i+1] = pcm[k*FRAME_SIZE+i];
+void write_audio(LPCNetEncState *st, const short *s_t_clean, const int *noise, FILE *file, int nframes) {
+  int t, idx_f;
+  int OFFSET_COEFF = NB_BANDS + 2 // BFCC+pitches
 
-      /* Simulate error on excitation. */
-      e += noise[k*FRAME_SIZE+i];
-      e = IMIN(255, IMAX(0, e));
+  for (idx_f=0; idx_f<nframes; idx_f++) {
+    /* Processing of single frame */
 
-      // Update samples for Linear Prediction (s_{t-1} ~ s_{t-LPC_ORDER})
-      //// sig_mem[1:] = sig_mem[0:LPC_ORDER]
+    // series of s_{t-1} (lagged/delayed) & s_t, linearlized
+    short s_t_1_s_t_series[2*FRAME_SIZE]; // Write buffer
+    int offset_frame = idx_f * FRAME_SIZE
+
+    for (t=0; t<FRAME_SIZE; t++) {
+      /* Process a sample t in the frame */
+
+      float p_t_noisy = 0; // Prediction, noise added
+      int j;               // LP order index
+
+      int idx_t = t + offset_frame // t_in_frame + frame_offset
+
+      /* Linear Prediction */
+      //                                                                 a_{j+1} * s_{t-(j+1)}_noisy
+      for (j=0;j<LPC_ORDER;j++) p_t_noisy -= st->features[idx_f][j+OFFSET_COEFF] * st->sig_mem[j];
+
+      /* LP Residual t=T */
+      float e_t_ideal = lin2ulaw(s_t_clean[idx_t] - p_t_noisy);
+
+      /* Sample t=T-1 (lagged/delayed) with noise */
+      float s_t_1_noisy = st->sig_mem[0]
+      s_t_1_s_t_series[2*t] = float2short(s_t_1_noisy);
+
+      /* Sample t=T without noise */
+      s_t_1_s_t_series[2*t+1] = s_t_clean[idx_t];
+
+      /* Noise addition */
+      // Derivatives: Noise source at residual (at sample @original -> at residual from @b858ea9)
+      float e_t_noisy = e_t_ideal + noise[idx_t];
+      e_t_noisy = IMIN(255, IMAX(0, e_t_noisy));
+      float s_t_noisy = p_t_noisy + ulaw2lin(e_t_noisy);
+
+      /* State update over loop */
+      //// Update t-2 ~ t-LPC_ORDER : sig_mem[1:] = sig_mem[0:LPC_ORDER-1]
       RNN_MOVE(&st->sig_mem[1], &st->sig_mem[0], LPC_ORDER-1);
-      //// s_t = Prediction + Residual
-      st->sig_mem[0] = p + ulaw2lin(e);
+      //// Update t-1 (s_t_1_noisy)
+      st->sig_mem[0] = s_t_noisy
 
-      // EXCitation_MEMory - Not used ...?
-      st->exc_mem = e;
+      // EXCitation_MEMory (Not used...?)
+      st->exc_mem = e_t_noisy;
     }
-    // Write `data` contents into `file` file
-    fwrite(data, 4*FRAME_SIZE, 1, file);
+
+    // Append `s_t_1_s_t_series` of a frame into `file` file
+    fwrite(s_t_1_s_t_series, 4*FRAME_SIZE, 1, file);
   }
 }
+
 
 int main(int argc, char **argv) {
   int i;
@@ -156,8 +178,8 @@ int main(int argc, char **argv) {
   FILE *f1;        // Input  file containing sample series (waveform) <input.s16>
   FILE *ffeat;     // Output file containing              <features.f32>
   FILE *fpcm=NULL; // Output file containing              <data.s16>
-  short pcm[FRAME_SIZE]={0}; // samples of a frame
-  short pcmbuf[FRAME_SIZE*4]={0};
+  short s_frame_clean[FRAME_SIZE]={0}; // samples of a frame
+  short s_4frames_clean[FRAME_SIZE*4]={0};      // samples of 4 frames
   int noisebuf[FRAME_SIZE*4]={0};
   short tmp[FRAME_SIZE] = {0};
   float savedX[FRAME_SIZE] = {0};
@@ -330,22 +352,28 @@ int main(int argc, char **argv) {
     for (i=0;i<FRAME_SIZE;i++) x[i] += rand()/(float)RAND_MAX - .5;
 
     /* PCM is delayed by 1/2 frame to make the features centered on the frames. */
-    for (i=0;i<FRAME_SIZE-TRAINING_OFFSET;i++) pcm[i+TRAINING_OFFSET] = float2short(x[i]);
+    for (i=0;i<FRAME_SIZE-TRAINING_OFFSET;i++) s_frame_clean[i+TRAINING_OFFSET] = float2short(x[i]);
+
+
 
     compute_frame_features(st, x);
 
-    // pcm -> pcmbuf
-    RNN_COPY(&pcmbuf[st->pcount*FRAME_SIZE], pcm, FRAME_SIZE);
-    // `if (fpcm)` check for non-train mode
-    if (fpcm) {
+    // 
+    int frame_start = st->pcount*FRAME_SIZE
+    // Stack a frame into the buffer for 4 frame grouped processing mode
+    RNN_COPY(&s_4frames_clean[frame_start], s_frame_clean, FRAME_SIZE);
+
+    /* ?? Noise */
+    if (fpcm) { // `if (fpcm)` check for non-train mode
         // Noise for training sample series augmentation
-        compute_noise(&noisebuf[st->pcount*FRAME_SIZE], noise_std);
+        compute_noise(&noisebuf[frame_start], noise_std);
     }
 
     // A. non-quantize
     if (!quantize) {
       process_single_frame(st, ffeat);
-      if (fpcm) write_audio(st, pcm, &noisebuf[st->pcount*FRAME_SIZE], fpcm, 1);
+      // Modify samples and Dump them into the `fpcm` file
+      if (fpcm) write_audio(st, s_frame_clean, &noisebuf[frame_start], fpcm, 1);
     }
     st->pcount++;
     /* Running on groups of 4 frames. */
@@ -354,13 +382,20 @@ int main(int argc, char **argv) {
       if (quantize) {
         unsigned char buf[8];
         process_superframe(st, buf, ffeat, encode, quantize);
-        if (fpcm) write_audio(st, pcmbuf, noisebuf, fpcm, 4);
+        if (fpcm) write_audio(st, s_4frames_clean, noisebuf, fpcm, 4);
       }
+      // counter reset
       st->pcount = 0;
     }
+    /* ================================================================================================== */
 
-    for (i=0;i<TRAINING_OFFSET;i++) pcm[i] = float2short(x[i+FRAME_SIZE-TRAINING_OFFSET]);
+
+    for (i=0;i<TRAINING_OFFSET;i++) s_frame_clean[i] = float2short(x[i+FRAME_SIZE-TRAINING_OFFSET]);
+
+    // Gain trainsition
     old_speech_gain = speech_gain;
+
+    // Increment the number of processed frames
     count++;
   }
 
