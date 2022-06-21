@@ -176,6 +176,7 @@ int sample_mdense(const MDenseLayer *layer, const float *input, const float *sam
 
    /* Computing all the random thresholds in advance. These thresholds are directly
       based on the logit to avoid computing the sigmoid.*/
+   // b0 ~ b7
    for (b=0;b<8;b+=4) {
        uint32_t r = kiss99_rand(rng);
        thresholds[b] = sampling_logit_table[r&0xFF];
@@ -198,8 +199,11 @@ int sample_mdense(const MDenseLayer *layer, const float *input, const float *sam
          sum1 += layer->input_weights[i*stride + j]*input[j];
          sum2 += layer->input_weights[i*stride + j + M]*input[j];
       }
+      // FC1 = a1 ○ tanh(W1x)
       sum1 = layer->factor[i]*tanh_approx(sum1);
+      // FC2 = a2 ○ tanh(W2x)
       sum2 = layer->factor[N + i]*tanh_approx(sum2);
+      // o = FC1 + FC2
       sum1 += sum2;
       /*sum1 = 1.f/(1 + exp(-sum1));*/
 #if 1 /* Sample the decision based on the logit. */
