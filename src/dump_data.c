@@ -44,14 +44,24 @@
 
 
 /**
+ * (maybe) Biquadratic filter
+ *
  * Args:
  *   y - Output
+ *   mem - 
+ *   x - Input
+ *   b - Parameter
+ *   a - Parameter
+ *   N - Length of input `x` and output `y`
  */
 static void biquad(float *y, float mem[2], const float *x, const float *b, const float *a, int N) {
   int i;
   for (i=0;i<N;i++) {
-    float xi, yi;
+    float xi, yi; // Input and Output
     xi = x[i];
+    //   x_i  + mem0'
+    // = x_i  + mem1'' + b0' * x_i' - a0' * y_i'
+    // = x_i  + mem1'' + b0' * x_i' - a0' * x_i' + mem0''
     yi = x[i] + mem[0];
     mem[0] = mem[1] + (b[0]*(double)xi - a[0]*(double)yi);
     mem[1] = (b[1]*(double)xi - a[1]*(double)yi);
@@ -80,14 +90,14 @@ static void rand_resp(float *a, float *b) {
 void compute_noise(int *noise, float noise_std) {
   int i;
   for (i=0;i<FRAME_SIZE;i++) {
-    //                               log(~[0, +∞))
+    //                        (1/√2)*log(~[0, +∞))
     // = floor(0.5 + noise_std*.707*log(~U[0, 1]/~U[0, 1]))
     noise[i] = (int)floor(.5 + noise_std*.707*(log_approx((float)rand()/RAND_MAX)-log_approx((float)rand()/RAND_MAX)));
   }
 }
 
 /**
- * Convert float value to Int16 with ... and clipping
+ * Cast fp32 to int16
  */
 static short float2short(float x)
 {
@@ -99,7 +109,7 @@ static short float2short(float x)
 
 /**
  * Write sample series to the file with noise addition.
- *
+ * 
  * Args:
  *   st - State containing 'frame feature' and 'samples over loop'
  *   s_t_clean - Sample t series (waveform) without noise
@@ -187,7 +197,7 @@ int main(int argc, char **argv) {
   int last_silent = 1;
   float old_speech_gain = 1;
   int one_pass_completed = 0;
-  LPCNetEncState *st;
+  LPCNetEncState *st; // State containing 'frame feature' and 'samples' over loop
   float noise_std=0;
   // `training`, `encode`, `decode`, `quantize`
   int training = -1; // -1 | 0 | 1, should be updated to 0|1 based on arguments
@@ -270,14 +280,18 @@ int main(int argc, char **argv) {
     size_t ret;
 
     // Read samples of single frame from <input.s16> on `x`
-    ////         len(x)
-    for (i=0;i<FRAME_SIZE;i++) x[i] = tmp[i];
+    ////         len(x)               `tmp` is initialized with 0
+    for (i=0;i<FRAME_SIZE;i++) x[i] = tmp[i]; // implicit cast?
+
+    // Load Int16 samples of a frame from <input.s16> onto `tmp` for next loop...?
     ret = fread(tmp, sizeof(short), FRAME_SIZE, f1);
     if (feof(f1) || ret != FRAME_SIZE) {
       if (!training) break;
+      // N-th pass from frame#0
       rewind(f1);
       ret = fread(tmp, sizeof(short), FRAME_SIZE, f1);
       if (ret != FRAME_SIZE) {
+        // Even first frame do not have enough length, something wrong.
         fprintf(stderr, "error reading\n");
         exit(1);
       }
@@ -286,82 +300,105 @@ int main(int argc, char **argv) {
 
     // Silent clipping (disabled @5627af3)
 
-    // Loop escape
-    //// For too small data, loop more than 2 passes
-    //// if      enough_data           && >=1_pass_completed
+    /* Loop escape */
+    // For too small data, loop more than 2 passes
+    // if        enough_data           && >=1_pass_completed
     if (count*FRAME_SIZE_5MS>=10000000 && one_pass_completed) break;
 
-    // Parameters
+    /* Parameter generation */
+    //   Updated once per 2821 frames
+    //   todo: Where dose the magic number 2821 come from ...?
     if (training && ++gain_change_count > 2821) {
-      float tmp, tmp2;
 
-      // speech_gain
+      /* SpecAug */
+      rand_resp(a_sig, b_sig); // ~U[-0.375, +0.375]
+
+      /* Gain */
       speech_gain = pow(10., (-20+(rand()%40))/20.);
       if (rand()%20==0) speech_gain *= .01;
       if (rand()%100==0) speech_gain = 0;
+
+      /* Noise (s_t_1_noisy) */
+      float tmp1 = (float)rand()/RAND_MAX; // ~ U[0, 1]
+      float tmp2 = (float)rand()/RAND_MAX; // ~ U[0, 1]
+      noise_std = ABS16(-1.5*log(1e-4 + tmp1) - .5*log(1e-4 + tmp2));
+
+      /* Reset parameter change count */
       gain_change_count = 0;
-
-      // ~U[-0.375, +0.375]
-      rand_resp(a_sig, b_sig);
-
-      // Noise parameter `noise_std` for training sample series augmentation
-      //// tmp, tmp2 ~ U[0, 1]
-      tmp = (float)rand()/RAND_MAX;
-      tmp2 = (float)rand()/RAND_MAX;
-      noise_std = ABS16(-1.5*log(1e-4+tmp)-.5*log(1e-4+tmp2));
     }
 
-    // In-place ??
+
+    /* ==== Augmentation ================================================================================ */
+    // Augment `x`, samples of a frame, by "SpecAug -> Preemphasis -> Gain -> NoiseAddition"
+
+    /* SpecAug */
+    // Derivatives: Random spectral augmentation (OFF @original -> ON @efficiency from @396274f)
+    //   c.f. Eq.7 of Valin, et al. (2017). *A Hybrid DSP/Deep Learning Approach to Real-Time Full-Band Speech Enhancement*. arxiv:1709.08243
+    // High-pass filter...? (a_hp=[-1.99599, 0.99600], b_hp=[-2, 1]) (seems to come from original RNNoise...?)
     biquad(x, mem_hp_x, x, b_hp, a_hp, FRAME_SIZE);
+    // Random spectral augmentation
     biquad(x, mem_resp_x, x, b_sig, a_sig, FRAME_SIZE);
 
-    // In-place Preemphasis
+    /* Preemphasis */
     preemphasis(x, &mem_preemph, x, PREEMPHASIS, FRAME_SIZE);
 
-    // In-place Gain
-    ////         len(x)
+    /* Gain */
     for (i=0;i<FRAME_SIZE;i++) {
-      float g;
-      float f = (float)i/FRAME_SIZE;
+      float g; // gain of a sample
+      float f = (float)i/FRAME_SIZE; // ratio in a frame
       // Gain smoothing
       g = f*speech_gain + (1-f)*old_speech_gain;
       x[i] *= g;
     }
 
-    // (maybe) In-place noise addition ~ U[-0.5, +0.5]
+    /* Noise addition */
+    // ~ U[-0.5, +0.5]
+    // todo: It looks strange. x will be used for clean target, so does it make output noisy...?
     for (i=0;i<FRAME_SIZE;i++) x[i] += rand()/(float)RAND_MAX - .5;
+    /* ================================================================================================== */
+
 
     /* PCM is delayed by 1/2 frame to make the features centered on the frames. */
     for (i=0;i<FRAME_SIZE-TRAINING_OFFSET;i++) s_frame_clean[i+TRAINING_OFFSET] = float2short(x[i]);
 
 
+    /* ==== Feature-nize ================================================================================ */
+    // Generate features
 
+    /* Feature extraction */
+    // Calculate parts of `.features` and store them in `st`
     compute_frame_features(st, x);
 
-    // 
+    /* Data stock */
     int frame_start = st->pcount*FRAME_SIZE
     // Stack a frame into the buffer for 4 frame grouped processing mode
     RNN_COPY(&s_4frames_clean[frame_start], s_frame_clean, FRAME_SIZE);
 
-    /* ?? Noise */
+    /* Noise generation for noisy sample augmentation */
     if (fpcm) { // `if (fpcm)` check for non-train mode
-        // Noise for training sample series augmentation
         compute_noise(&noisebuf[frame_start], noise_std);
     }
 
     // A. non-quantize
     if (!quantize) {
+      /* Pitch generation and Dump */
+      // Calculate remaining `.features` (pitches) and Dump full `.features` into the `ffeat` file
       process_single_frame(st, ffeat);
-      // Modify samples and Dump them into the `fpcm` file
+
+      /* Sample series generation and Dump */
       if (fpcm) write_audio(st, s_frame_clean, &noisebuf[frame_start], fpcm, 1);
     }
     st->pcount++;
-    /* Running on groups of 4 frames. */
+    /* Running on groups of 4 frames when quantize mode. */
     if (st->pcount == 4) {
       // B. quantize
       if (quantize) {
         unsigned char buf[8];
+
+        /* Pitch generation and Dump */
         process_superframe(st, buf, ffeat, encode, quantize);
+
+        /* Sample series generation and dump */
         if (fpcm) write_audio(st, s_4frames_clean, noisebuf, fpcm, 4);
       }
       // counter reset
@@ -372,18 +409,19 @@ int main(int argc, char **argv) {
 
     for (i=0;i<TRAINING_OFFSET;i++) s_frame_clean[i] = float2short(x[i+FRAME_SIZE-TRAINING_OFFSET]);
 
-    // Gain trainsition
+    /* Gain trainsition */
     old_speech_gain = speech_gain;
 
     // Increment the number of processed frames
     count++;
   }
 
-  // Termination (, LPCNet)
+  /* Termination */
   fclose(f1);
   fclose(ffeat);
   if (fpcm) fclose(fpcm);
   lpcnet_encoder_destroy(st);
+
   return 0;
 }
 

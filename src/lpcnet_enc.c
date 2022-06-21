@@ -515,8 +515,11 @@ void compute_frame_features(LPCNetEncState *st, const float *in) {
   dct(st->features[st->pcount], Ly);
   st->features[st->pcount][0] -= 4;
   lpc_from_cepstrum(st->lpc, st->features[st->pcount]);
-  // Update i-th order LP coefficient for i in range(LPC_ORDER)
+
+  // Update LP coefficients in `features`
+  // [0:NB_BANDS] - BFCC, [NB_BANDS:NB_BANDS+1] - Pitch Period, [NB_BANDS+1:NB_BANDS+2] - Pitch Correlation, [NB_BANDS+2:] - LP coefficients
   for (i=0;i<LPC_ORDER;i++) st->features[st->pcount][NB_BANDS+2+i] = st->lpc[i];
+
   RNN_MOVE(st->exc_buf, &st->exc_buf[FRAME_SIZE], PITCH_MAX_PERIOD);
   RNN_COPY(&aligned_in[TRAINING_OFFSET], in, FRAME_SIZE-TRAINING_OFFSET);
   for (i=0;i<FRAME_SIZE;i++) {
@@ -541,24 +544,24 @@ void compute_frame_features(LPCNetEncState *st, const float *in) {
       ener = (1 + ener0 + celt_inner_prod(&st->exc_buf[i+off], &st->exc_buf[i+off], FRAME_SIZE/2));
       st->xc[2+2*st->pcount+sub][i] = 2*xcorr[i] / ener;
     }
-    if (0) {
-      /* Upsample correlation by 3x and keep the max. */
-      float interpolated[PITCH_MAX_PERIOD]={0};
-      /* interp=sinc([-3:3]+1/3).*(.5+.5*cos(pi*[-3:3]/4.5)); interp=interp/sum(interp); */
-      static const float interp[7] = {0.026184, -0.098339, 0.369938, 0.837891, -0.184969, 0.070242, -0.020947};
-      for (i=4;i<PITCH_MAX_PERIOD-4;i++) {
-        float val1=0, val2=0;
-        int j;
-        for (j=0;j<7;j++) {
-          val1 += st->xc[2+2*st->pcount+sub][i-3+j]*interp[j];
-          val2 += st->xc[2+2*st->pcount+sub][i+3-j]*interp[j];
-          interpolated[i] = MAX16(st->xc[2+2*st->pcount+sub][i], MAX16(val1, val2));
-        }
-      }
-      for (i=4;i<PITCH_MAX_PERIOD-4;i++) {
-        st->xc[2+2*st->pcount+sub][i] = interpolated[i];
-      }
-    }
+    // if (0) {
+    //   /* Upsample correlation by 3x and keep the max. */
+    //   float interpolated[PITCH_MAX_PERIOD]={0};
+    //   /* interp=sinc([-3:3]+1/3).*(.5+.5*cos(pi*[-3:3]/4.5)); interp=interp/sum(interp); */
+    //   static const float interp[7] = {0.026184, -0.098339, 0.369938, 0.837891, -0.184969, 0.070242, -0.020947};
+    //   for (i=4;i<PITCH_MAX_PERIOD-4;i++) {
+    //     float val1=0, val2=0;
+    //     int j;
+    //     for (j=0;j<7;j++) {
+    //       val1 += st->xc[2+2*st->pcount+sub][i-3+j]*interp[j];
+    //       val2 += st->xc[2+2*st->pcount+sub][i+3-j]*interp[j];
+    //       interpolated[i] = MAX16(st->xc[2+2*st->pcount+sub][i], MAX16(val1, val2));
+    //     }
+    //   }
+    //   for (i=4;i<PITCH_MAX_PERIOD-4;i++) {
+    //     st->xc[2+2*st->pcount+sub][i] = interpolated[i];
+    //   }
+    // }
 #if 0
     for (i=0;i<PITCH_MAX_PERIOD;i++)
       printf("%f ", st->xc[2*st->pcount+sub][i]);
@@ -794,6 +797,9 @@ void process_multi_frame(LPCNetEncState *st, FILE *ffeat) {
   }
 }
 
+/**
+ * Calculate pitch features and dump whole features into the file.
+ */
 void process_single_frame(LPCNetEncState *st, FILE *ffeat) {
   int i;
   int sub;
@@ -802,11 +808,13 @@ void process_single_frame(LPCNetEncState *st, FILE *ffeat) {
   int pitch_prev[2][PITCH_MAX_PERIOD];
   float frame_corr;
   float frame_weight_sum = 1e-15;
+  // `.frame_weight`
   for(sub=0;sub<2;sub++) frame_weight_sum += st->frame_weight[2+2*st->pcount+sub];
   for(sub=0;sub<2;sub++) st->frame_weight[2+2*st->pcount+sub] *= (2.f/frame_weight_sum);
   for(sub=0;sub<2;sub++) {
     float max_path_all = -1e15;
     best_i = 0;
+    // `.xc`
     for (i=0;i<PITCH_MAX_PERIOD-2*PITCH_MIN_PERIOD;i++) {
       float xc_half = MAX16(MAX16(st->xc[2+2*st->pcount+sub][(PITCH_MAX_PERIOD+i)/2], st->xc[2+2*st->pcount+sub][(PITCH_MAX_PERIOD+i+2)/2]), st->xc[2+2*st->pcount+sub][(PITCH_MAX_PERIOD+i-1)/2]);
       if (st->xc[2+2*st->pcount+sub][i] < xc_half*1.1) st->xc[2+2*st->pcount+sub][i] *= .8;
@@ -836,18 +844,26 @@ void process_single_frame(LPCNetEncState *st, FILE *ffeat) {
     st->pitch_max_path_all = max_path_all;
     st->best_i = best_i;
   }
+  // `.best_i`
   best_i = st->best_i;
   frame_corr = 0;
   /* Backward pass. */
   for (sub=1;sub>=0;sub--) {
+    // Update `best`
     best[2+sub] = PITCH_MAX_PERIOD-best_i;
-    frame_corr += st->frame_weight[2+2*st->pcount+sub]*st->xc[2+2*st->pcount+sub][best_i];
+    frame_corr += st->frame_weight[2+2*st->pcount+sub] * st->xc[2+2*st->pcount+sub][best_i];
     best_i = pitch_prev[sub][best_i];
   }
   frame_corr /= 2;
+
+  // Update Pitches in `features`
+  // [0:NB_BANDS] - BFCC, [NB_BANDS:NB_BANDS+1] - Pitch Period, [NB_BANDS+1:NB_BANDS+2] - Pitch Correlation, [NB_BANDS+2:] - LP coefficients
+  // PitchPeriod ∈ [6.6, 31.0]       .01*(IMAX(66, IMIN(510, best[2]+best[3])) - 200); 
   st->features[st->pcount][NB_BANDS] = .01*(IMAX(66, IMIN(510, best[2]+best[3]))-200);
   st->features[st->pcount][NB_BANDS + 1] = frame_corr-.5;
 
+  /* Save */
+  // Write out full `features` into the `ffeat` file
   if (ffeat) {
     fwrite(st->features[st->pcount], sizeof(float), NB_TOTAL_FEATURES, ffeat);
   }
