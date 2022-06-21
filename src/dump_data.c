@@ -285,26 +285,6 @@ int main(int argc, char **argv) {
     }
 
     // Silent clipping (disabled @5627af3)
-    float E=0;
-    int silent;
-    for (i=0;i<FRAME_SIZE;i++) E += tmp[i]*(float)tmp[i];
-    if (0 && training) {
-      silent = E < 5000 || (last_silent && E < 20000);
-      if (!last_silent && silent) {
-        for (i=0;i<FRAME_SIZE;i++) savedX[i] = x[i];
-      }
-      if (last_silent && !silent) {
-          for (i=0;i<FRAME_SIZE;i++) {
-            float f = (float)i/FRAME_SIZE;
-            tmp[i] = (int)floor(.5 + f*tmp[i] + (1-f)*savedX[i]);
-          }
-      }
-      if (last_silent) {
-        last_silent = silent;
-        continue;
-      }
-      last_silent = silent;
-    }
 
     // Loop escape
     //// For too small data, loop more than 2 passes
