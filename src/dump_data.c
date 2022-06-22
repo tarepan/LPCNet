@@ -119,14 +119,14 @@ static short float2short(float x)
  */
 void write_audio(LPCNetEncState *st, const short *s_t_clean, const int *noise, FILE *file, int nframes) {
   int t, idx_f;
-  int OFFSET_COEFF = NB_BANDS + 2 // BFCC+pitches
+  int OFFSET_COEFF = NB_BANDS + 2; // BFCC+pitches
 
   for (idx_f=0; idx_f<nframes; idx_f++) {
     /* Processing of single frame */
 
     // series of s_{t-1} (lagged/delayed) & s_t, linearlized
     short s_t_1_s_t_series[2*FRAME_SIZE]; // Write buffer
-    int offset_frame = idx_f * FRAME_SIZE
+    int offset_frame = idx_f * FRAME_SIZE;
 
     for (t=0; t<FRAME_SIZE; t++) {
       /* Process a sample t in the frame */
@@ -134,7 +134,7 @@ void write_audio(LPCNetEncState *st, const short *s_t_clean, const int *noise, F
       float p_t_noisy = 0; // Prediction, noise added
       int j;               // LP order index
 
-      int idx_t = t + offset_frame // t_in_frame + frame_offset
+      int idx_t = t + offset_frame; // t_in_frame + frame_offset
 
       /* Linear Prediction */
       //                                                                 a_{j+1} * s_{t-(j+1)}_noisy
@@ -144,7 +144,7 @@ void write_audio(LPCNetEncState *st, const short *s_t_clean, const int *noise, F
       float e_t_ideal = lin2ulaw(s_t_clean[idx_t] - p_t_noisy);
 
       /* Sample t=T-1 (lagged/delayed) with noise */
-      float s_t_1_noisy = st->sig_mem[0]
+      float s_t_1_noisy = st->sig_mem[0];
       s_t_1_s_t_series[2*t] = float2short(s_t_1_noisy);
 
       /* Sample t=T without noise */
@@ -160,7 +160,7 @@ void write_audio(LPCNetEncState *st, const short *s_t_clean, const int *noise, F
       //// Update t-2 ~ t-LPC_ORDER : sig_mem[1:] = sig_mem[0:LPC_ORDER-1]
       RNN_MOVE(&st->sig_mem[1], &st->sig_mem[0], LPC_ORDER-1);
       //// Update t-1 (s_t_1_noisy)
-      st->sig_mem[0] = s_t_noisy
+      st->sig_mem[0] = s_t_noisy;
 
       // EXCitation_MEMory (Not used...?)
       st->exc_mem = e_t_noisy;
@@ -192,9 +192,7 @@ int main(int argc, char **argv) {
   short s_4frames_clean[FRAME_SIZE*4]={0};      // samples of 4 frames
   int noisebuf[FRAME_SIZE*4]={0};
   short tmp[FRAME_SIZE] = {0};
-  float savedX[FRAME_SIZE] = {0};
   float speech_gain=1;
-  int last_silent = 1;
   float old_speech_gain = 1;
   int one_pass_completed = 0;
   LPCNetEncState *st; // State containing 'frame feature' and 'samples' over loop
@@ -370,7 +368,7 @@ int main(int argc, char **argv) {
     compute_frame_features(st, x);
 
     /* Data stock */
-    int frame_start = st->pcount*FRAME_SIZE
+    int frame_start = st->pcount*FRAME_SIZE;
     // Stack a frame into the buffer for 4 frame grouped processing mode
     RNN_COPY(&s_4frames_clean[frame_start], s_frame_clean, FRAME_SIZE);
 
