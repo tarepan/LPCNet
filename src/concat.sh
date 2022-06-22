@@ -2,5 +2,6 @@
 # into one headerless training file
 for i in */*.wav
 do
-sox $i -r 16000 -c 1 -t sw -
+#      16kHz,    1 channel, int16,  to stdout
+sox $i -r 16000  -c 1       -t sw   -
 done > input.s16
