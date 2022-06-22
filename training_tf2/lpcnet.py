@@ -121,7 +121,7 @@ class SparsifyGRUA(Callback):
                     #         1 -   sparsity * attenuation_rate
                     density = 1 - (1-density)*(1 - r*r*r)
 
-                #### Block masking by keeping topN blocks and diagonal blocks ###################
+                #### Block masking by keeping topN blocks without considering diagonal terms ###################
                 # Exclude diagonal terms, which are preserved independently
                 A = A - np.diag(np.diag(A))
 
