@@ -53,7 +53,7 @@ parser = argparse.ArgumentParser(description='Train an LPCNet model')
 # Data
 parser.add_argument('features', metavar='<features file>', help='binary features file (float32)')
 parser.add_argument('data', metavar='<audio data file>', help='binary audio data file (uint8)')
-parser.add_argument('output', metavar='<output>', help='trained model file (.h5)')
+parser.add_argument('output', metavar='<output>', help='Output path prefix (including directory)')
 # Model mode
 parser.add_argument('--model', metavar='<model>', default='lpcnet', help='LPCNet model python definition (without .py)')
 group1 = parser.add_mutually_exclusive_group()
@@ -81,7 +81,6 @@ parser.add_argument('--decay', metavar='<decay>', type=float, help='learning rat
 parser.add_argument('--gamma', metavar='<gamma>', type=float, help='adjust u-law compensation (default 2.0, should not be less than 1.0)')
 #
 parser.add_argument('--lookahead', metavar='<nb frames>', default=2, type=int, help='Number of look-ahead frames (default 2)')
-parser.add_argument('--logdir', metavar='<log dir>', help='directory for tensorboard log files')
 parser.add_argument('--resume-model', metavar='<epoch>', type=str, help='Resume training from this model')
 parser.add_argument('--from-epoch', metavar='<epoch>', type=int, default=0, help='Resume training from this epoch')
 parser.add_argument('--from-step', metavar='<step>', type=int, default=0, help='Resume training from this global step')
@@ -227,7 +226,7 @@ callbacks = [checkpoint, grua_sparsify, grub_sparsify]
 # Logging
 if args.logdir is not None:
     callbacks.append(tf.keras.callbacks.TensorBoard(
-        log_dir=f'{args.logdir}/{args.output}_{args.grua_size}_logs'
+        log_dir=f'{args.output}_{args.grua_size}_logs'
     ))
 
 # Run training
