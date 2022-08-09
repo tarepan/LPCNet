@@ -33,15 +33,16 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger
+from tensorflow.keras.callbacks import ModelCheckpoint
 
 from tf_funcs import *
-from tf_funcs import diff_pred
+from tf_funcs import diff_pred, diff_rc2lpc
 from lossfuncs import *
-from lossfuncs import metric_cel
+from lossfuncs import metric_cel, interp_mulaw, loss_matchlar, metric_icel, metric_exc_sd, metric_oginterploss
 from dataloader import LPCNetLoader
 from diffembed import diff_Embed
 from mdense import MDense
+
 
 #### Args ####################################################################################################################
 parser = argparse.ArgumentParser(description='Train an LPCNet model')
@@ -104,7 +105,9 @@ ORDER_LPC: int = 16
 ## Training resume
 if args.resume_model is not None:
     custom_objs = {"diff_pred": diff_pred, "diff_Embed": diff_Embed, "PCMInit": lpcnet.PCMInit, "WeightClip": lpcnet.WeightClip,
-        "MDense": MDense, "metric_cel": metric_cel,}
+        "MDense": MDense, "metric_cel": metric_cel, "diff_rc2lpc": diff_rc2lpc,
+        "interp_mulaw": interp_mulaw, "loss_matchlar": loss_matchlar, "metric_icel": metric_icel, "metric_exc_sd": metric_exc_sd, "metric_oginterploss": metric_oginterploss,
+    }
     model = keras.models.load_model(args.resume_model, custom_objects=custom_objs)
     print(f"Resumed from Model {args.resume_model}")
     # todo: Fix hardcoding
@@ -121,18 +124,14 @@ else:
     opt = Adam(lr, decay=decay, beta_2=0.99)
 
     # Model
-    ## For Distributed learning
-    strategy = tf.distribute.experimental.MultiWorkerMirroredStrategy()
-    with strategy.scope():
-    ##/
-        model, _, _ = lpcnet.new_lpcnet_model(rnn_units1=args.grua_size, rnn_units2=args.grub_size, batch_size=batch_size, training=True, quantize=quantize, flag_e2e = flag_e2e, cond_size=args.cond_size)
-        if not flag_e2e:
-            model.compile(optimizer=opt, loss=metric_cel, metrics=metric_cel)
-        else:
-            model.compile(optimizer=opt, loss = [interp_mulaw(gamma=gamma), loss_matchlar()], loss_weights = [1.0, 2.0], metrics={'pdf':[metric_cel,metric_icel,metric_exc_sd,metric_oginterploss]})
+    model, _, _ = lpcnet.new_lpcnet_model(rnn_units1=args.grua_size, rnn_units2=args.grub_size, batch_size=batch_size, training=True, quantize=quantize, flag_e2e = flag_e2e, cond_size=args.cond_size)
+    if not flag_e2e:
+        model.compile(optimizer=opt, loss=metric_cel, metrics=metric_cel)
+    else:
+        model.compile(optimizer=opt, loss = [interp_mulaw(gamma=gamma), loss_matchlar()], loss_weights = [1.0, 2.0], metrics={'pdf':[metric_cel,metric_icel,metric_exc_sd,metric_oginterploss]})
 
-        # Report model architecture
-        model.summary()
+    # Report model architecture
+    model.summary()
 
 ## Additional training mode
 if quantize or retrain:
@@ -231,5 +230,5 @@ if args.logdir is not None:
         log_dir=f'{args.logdir}/{args.output}_{args.grua_size}_logs'
     ))
 
-# Run training (always start from epoch#0 (`initial_epoch` is not used))
+# Run training
 model.fit(loader, initial_epoch=args.from_epoch, epochs=args.epochs, validation_split=0.0, callbacks=callbacks)
