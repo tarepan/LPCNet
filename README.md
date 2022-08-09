@@ -1,4 +1,10 @@
-# LPCNet
+<div align="center">
+
+# LPCNet <!-- omit in toc -->
+[![ColabBadge]][notebook]
+[![PaperBadge]][paper]  
+
+</div>
 
 Low complexity implementation of the LPCNet algorithm, as described in:
 
@@ -133,3 +139,8 @@ See the datasets.txt file for details on suitable training data.
 1. [A Real-Time Wideband Neural Vocoder at 1.6 kb/s Using LPCNet](https://people.xiph.org/~jm/demo/lpcnet_codec/)
 1. Sample model files (check compatibility): https://media.xiph.org/lpcnet/data/ 
 
+[ColabBadge]:https://colab.research.google.com/assets/colab-badge.svg
+
+[paper]:https://arxiv.org/abs/2202.11169
+[PaperBadge]:https://img.shields.io/badge/paper-arxiv.2202.11169-B31B1B.svg
+[notebook]:https://colab.research.google.com/github/tarepan/LPCNet/blob/master/LPCNet.ipynb
