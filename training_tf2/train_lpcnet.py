@@ -224,10 +224,9 @@ model.save_weights(f"{args.output}_{args.grua_size}_initial.h5")
 callbacks = [checkpoint, grua_sparsify, grub_sparsify]
 
 # Logging
-if args.logdir is not None:
-    callbacks.append(tf.keras.callbacks.TensorBoard(
-        log_dir=f'{args.output}_{args.grua_size}_logs'
-    ))
+callbacks.append(tf.keras.callbacks.TensorBoard(
+    log_dir=f'{args.output}_{args.grua_size}_logs'
+))
 
 # Run training
 model.fit(loader, initial_epoch=args.from_epoch, epochs=args.epochs, validation_split=0.0, callbacks=callbacks)
