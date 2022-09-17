@@ -109,62 +109,51 @@ static short float2short(float x)
  * Write two sample series (s_t_1_noisy & s_t_clean) to the file.
  * 
  * Args:
- *   st - State containing 'LP coefficients' and 'samples over loop'
+ *   st        - State containing 'LP coefficients' and 'samples over loop'
  *   s_t_clean - Sample t series (waveform) without noise
- *   noise - Noise series for s_t_1_noisy argumentation
- *   file - File pointer of output
- *   nframes - The number of frames which `s_t_clean` and `noise` chunks contain
+ *   noise     - Noise series for s_t_1_noisy argumentation
+ *   file      - Output file pointer
  */
-void write_audio(LPCNetEncState *st, const short *s_t_clean, const int *noise, FILE *file, int nframes) {
-  int t, idx_f;
+void write_audio(LPCNetEncState *st, const short *s_t_clean, const int *noise, FILE *file) {
   int OFFSET_COEFF = NB_BANDS + 2; // BFCC+pitches
 
-  for (idx_f=0; idx_f<nframes; idx_f++) {
-    /* Processing of single frame (for nframes==1, just process once) */
+  // series of s_{t-1} (lagged/delayed) & s_t, linearlized
+  short s_t_1_s_t_series[2*FRAME_SIZE];
 
-    // series of s_{t-1} (lagged/delayed) & s_t, linearlized
-    short s_t_1_s_t_series[2*FRAME_SIZE]; // Write buffer
-    int offset_frame = idx_f * FRAME_SIZE;
+  int t;
+  for (t=0; t<FRAME_SIZE; t++) {
+    /* Process a sample t in the frame */
 
-    for (t=0; t<FRAME_SIZE; t++) {
-      /* Process a sample t in the frame */
+    float p_t_noisy = 0; // Prediction, noise added
 
-      float p_t_noisy = 0; // Prediction, noise added
-      int j;               // LP order index
+    /* Linear Prediction - prediction from noisy samples */
+    //                                                             a_{j+1} * s_{t-(j+1)}_noisy
+    int j;
+    for (j=0;j<LPC_ORDER;j++) p_t_noisy -= st->features[0][j+OFFSET_COEFF] * st->sig_mem[j];
 
-      int idx_t = t + offset_frame; // t_in_frame + frame_offset
+    /* Ideal LP Residual - Ideal residual inference under erroneous (noisy) previous samples */
+    float e_t_ideal = lin2ulaw(s_t_clean[t] - p_t_noisy);
 
-      /* Linear Prediction - noisy prediction from noisy samples */
-      //                                                                 a_{j+1} * s_{t-(j+1)}_noisy
-      for (j=0;j<LPC_ORDER;j++) p_t_noisy -= st->features[idx_f][j+OFFSET_COEFF] * st->sig_mem[j];
+    /* Sample t=T-1 (lagged/delayed) with noise */
+    float s_t_1_noisy = st->sig_mem[0];
+    s_t_1_s_t_series[2*t] = float2short(s_t_1_noisy);
 
-      /* Ideal LP Residual - Ideal residual inference under erroneous (noisy) previous samples */
-      float e_t_ideal = lin2ulaw(s_t_clean[idx_t] - p_t_noisy);
+    /* Sample t=T without noise */
+    s_t_1_s_t_series[2*t+1] = s_t_clean[t];
 
-      /* Sample t=T-1 (lagged/delayed) with noise */
-      float s_t_1_noisy = st->sig_mem[0];
-      s_t_1_s_t_series[2*t] = float2short(s_t_1_noisy);
+    /* Noise addition - Emulate the situation 'Try to yield ideal e_t under erroneous samples, but has some error in the e_t' */
+    // Derivatives: Noise source at residual (at sample @original -> at residual from @b858ea9)
+    float e_t_noisy = e_t_ideal + noise[t];
+    e_t_noisy = IMIN(255, IMAX(0, e_t_noisy));
+    float s_t_noisy = p_t_noisy + ulaw2lin(e_t_noisy);
 
-      /* Sample t=T without noise */
-      s_t_1_s_t_series[2*t+1] = s_t_clean[idx_t];
+    /* State update over loop */
+    //// Update s_t_x_noisy's {t-2} ~ {t-LPC_ORDER} (sig_mem[1:] = sig_mem[0:LPC_ORDER-1])
+    RNN_MOVE(&st->sig_mem[1], &st->sig_mem[0], LPC_ORDER-1);
+    //// Update t-1 (s_t_1_noisy)
+    st->sig_mem[0] = s_t_noisy;
 
-      /* Noise addition - Emulate the situation 'Try to yield ideal e_t under erroneous samples, but has some error in the e_t' */
-      // Derivatives: Noise source at residual (at sample @original -> at residual from @b858ea9)
-      float e_t_noisy = e_t_ideal + noise[idx_t];
-      e_t_noisy = IMIN(255, IMAX(0, e_t_noisy));
-      float s_t_noisy = p_t_noisy + ulaw2lin(e_t_noisy);
-
-      /* ✅ State update over loop */
-      //// Update s_t_x_noisy's {t-2} ~ {t-LPC_ORDER} (sig_mem[1:] = sig_mem[0:LPC_ORDER-1])
-      RNN_MOVE(&st->sig_mem[1], &st->sig_mem[0], LPC_ORDER-1);
-      //// Update t-1 (s_t_1_noisy)
-      st->sig_mem[0] = s_t_noisy;
-
-      // EXCitation_MEMory (Not used...?)
-      st->exc_mem = e_t_noisy;
-    }
-
-    // Append `s_t_1_s_t_series` of a frame into `file` file
+    // Append `s_t_1_s_t_series` into the file
     fwrite(s_t_1_s_t_series, 4*FRAME_SIZE, 1, file);
   }
 }
@@ -209,21 +198,29 @@ int main(int argc, char **argv) {
   if (argc == 5 && strcmp(argv[1], "-qtrain")==0) {
       training = 1;
       quantize = 1;
+      fprintf(stderr, "-qtrain is disabled.");
+      return 1;
   }
   // test/inference (== not train)
   if (argc == 4 && strcmp(argv[1], "-test")==0) training = 0;
   if (argc == 4 && strcmp(argv[1], "-qtest")==0) {
       training = 0;
       quantize = 1;
+      fprintf(stderr, "-qtest is disabled.");
+      return 1;
   }
   if (argc == 4 && strcmp(argv[1], "-encode")==0) {
       training = 0;
       quantize = 1;
       encode = 1;
+      fprintf(stderr, "-encode is disabled.");
+      return 1;
   }
   if (argc == 4 && strcmp(argv[1], "-decode")==0) {
       training = 0;
       decode = 1;
+      fprintf(stderr, "-decode is disabled.");
+      return 1;
   }
 
   // Validation and file open
@@ -384,30 +381,16 @@ int main(int argc, char **argv) {
         compute_noise(&noisebuf[frame_start], noise_std);
     }
 
-    // A. non-quantize
-    if (!quantize) {
-      /* Pitch generation and Dump */
-      // Calculate remaining `.features` (pitches) and Dump full `.features` into the `ffeat` file
-      process_single_frame(st, ffeat);
+    /* Pitch generation and Dump */
+    // Calculate remaining `.features` (pitches) and Dump full `.features` into the `ffeat` file
+    process_single_frame(st, ffeat);
 
-      /* Sample series (s_t_1_noisy & s_t_clean) augmentation and Dump */
-      //                                                                     singleFrame
-      if (fpcm) write_audio(st, s_frame_clean, &noisebuf[frame_start], fpcm, 1);
-    }
+    /* Sample series (s_t_1_noisy & s_t_clean) augmentation and Dump */
+    if (fpcm) write_audio(st, s_frame_clean, &noisebuf[frame_start], fpcm);
+
+    /* 4 frame counting */
     st->pcount++;
-    /* Running on groups of 4 frames when quantize mode. */
     if (st->pcount == 4) {
-      // B. quantize
-      if (quantize) {
-        unsigned char buf[8];
-
-        /* Pitch generation and Dump */
-        process_superframe(st, buf, ffeat, encode, quantize);
-
-        /* Sample series generation and dump */
-        if (fpcm) write_audio(st, s_4frames_clean, noisebuf, fpcm, 4);
-      }
-      // counter reset
       st->pcount = 0;
     }
     /* ================================================================================================== */

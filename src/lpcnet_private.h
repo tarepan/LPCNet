@@ -62,7 +62,6 @@ struct LPCNetEncState{
   float vq_mem[NB_BANDS];
   float features[4][NB_TOTAL_FEATURES];
   float sig_mem[LPC_ORDER];                  // samples for Linear Prediction (signal_memory?)
-  int exc_mem;
 };
 
 #define PLC_BUF_SIZE (FEATURES_DELAY*FRAME_SIZE + TRAINING_OFFSET)
