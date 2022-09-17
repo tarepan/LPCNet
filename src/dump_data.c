@@ -44,26 +44,23 @@
 
 
 /**
- * (maybe) Biquadratic filter
+ * ✅ Biquadratic filter (2nd-order feed-forward & 2nd-order feed-back IIR)
  *
  * Args:
- *   y - Output
- *   mem - 
- *   x - Input
- *   b - Parameter
- *   a - Parameter
- *   N - Length of input `x` and output `y`
+ *   y   - Output series
+ *   mem - y_{i-1} and y_{i-2} memory over loop
+ *   x   - Input series
+ *   b   - Feedforward parameter
+ *   a   - Feedback    parameter
+ *   N   - Length of input series `x` and output series `y`
  */
 static void biquad(float *y, float mem[2], const float *x, const float *b, const float *a, int N) {
   int i;
   for (i=0;i<N;i++) {
     float xi, yi; // Input and Output
     xi = x[i];
-    //   x_i  + mem0'
-    // = x_i  + mem1'' + b0' * x_i' - a0' * y_i'
-    // = x_i  + mem1'' + b0' * x_i' - a0' * x_i' + mem0''
     yi = x[i] + mem[0];
-    mem[0] = mem[1] + (b[0]*(double)xi - a[0]*(double)yi);
+    mem[0] = mem[1] + (b[0]*(double)xi - a[0]*(double)yi); // (b_1 * x_{i-2} - a_1 * x_{i-2}) + (b_0 * x_{i-1} - a_0 * y_{i-1})
     mem[1] = (b[1]*(double)xi - a[1]*(double)yi);
     y[i] = yi;
   }
@@ -78,7 +75,7 @@ static float uni_rand() {
 }
 
 /**
- * 4 samplings from U[-0.375, +0.375]
+ * ✅ 4 samplings from U[-0.375, +0.375]
  */
 static void rand_resp(float *a, float *b) {
   a[0] = .75*uni_rand();
@@ -87,6 +84,7 @@ static void rand_resp(float *a, float *b) {
   b[1] = .75*uni_rand();
 }
 
+/* Compute noise for s_t_1_noisy */
 void compute_noise(int *noise, float noise_std) {
   int i;
   for (i=0;i<FRAME_SIZE;i++) {
@@ -108,12 +106,12 @@ static short float2short(float x)
 
 
 /**
- * Write sample series to the file with noise addition.
+ * Write two sample series (s_t_1_noisy & s_t_clean) to the file.
  * 
  * Args:
- *   st - State containing 'frame feature' and 'samples over loop'
+ *   st - State containing 'LP coefficients' and 'samples over loop'
  *   s_t_clean - Sample t series (waveform) without noise
- *   noise - Noise series for argumentation of training sample series
+ *   noise - Noise series for s_t_1_noisy argumentation
  *   file - File pointer of output
  *   nframes - The number of frames which `s_t_clean` and `noise` chunks contain
  */
@@ -122,7 +120,7 @@ void write_audio(LPCNetEncState *st, const short *s_t_clean, const int *noise, F
   int OFFSET_COEFF = NB_BANDS + 2; // BFCC+pitches
 
   for (idx_f=0; idx_f<nframes; idx_f++) {
-    /* Processing of single frame */
+    /* Processing of single frame (for nframes==1, just process once) */
 
     // series of s_{t-1} (lagged/delayed) & s_t, linearlized
     short s_t_1_s_t_series[2*FRAME_SIZE]; // Write buffer
@@ -136,11 +134,11 @@ void write_audio(LPCNetEncState *st, const short *s_t_clean, const int *noise, F
 
       int idx_t = t + offset_frame; // t_in_frame + frame_offset
 
-      /* Linear Prediction */
+      /* Linear Prediction - noisy prediction from noisy samples */
       //                                                                 a_{j+1} * s_{t-(j+1)}_noisy
       for (j=0;j<LPC_ORDER;j++) p_t_noisy -= st->features[idx_f][j+OFFSET_COEFF] * st->sig_mem[j];
 
-      /* LP Residual t=T */
+      /* Ideal LP Residual - Ideal residual inference under erroneous (noisy) previous samples */
       float e_t_ideal = lin2ulaw(s_t_clean[idx_t] - p_t_noisy);
 
       /* Sample t=T-1 (lagged/delayed) with noise */
@@ -150,14 +148,14 @@ void write_audio(LPCNetEncState *st, const short *s_t_clean, const int *noise, F
       /* Sample t=T without noise */
       s_t_1_s_t_series[2*t+1] = s_t_clean[idx_t];
 
-      /* Noise addition */
+      /* Noise addition - Emulate the situation 'Try to yield ideal e_t under erroneous samples, but has some error in the e_t' */
       // Derivatives: Noise source at residual (at sample @original -> at residual from @b858ea9)
       float e_t_noisy = e_t_ideal + noise[idx_t];
       e_t_noisy = IMIN(255, IMAX(0, e_t_noisy));
       float s_t_noisy = p_t_noisy + ulaw2lin(e_t_noisy);
 
-      /* State update over loop */
-      //// Update t-2 ~ t-LPC_ORDER : sig_mem[1:] = sig_mem[0:LPC_ORDER-1]
+      /* ✅ State update over loop */
+      //// Update s_t_x_noisy's {t-2} ~ {t-LPC_ORDER} (sig_mem[1:] = sig_mem[0:LPC_ORDER-1])
       RNN_MOVE(&st->sig_mem[1], &st->sig_mem[0], LPC_ORDER-1);
       //// Update t-1 (s_t_1_noisy)
       st->sig_mem[0] = s_t_noisy;
@@ -190,7 +188,7 @@ int main(int argc, char **argv) {
   FILE *fpcm=NULL; // Output file containing              <data.s16>
   short s_frame_clean[FRAME_SIZE]={0}; // samples of a frame
   short s_4frames_clean[FRAME_SIZE*4]={0};      // samples of 4 frames
-  int noisebuf[FRAME_SIZE*4]={0};
+  int noisebuf[FRAME_SIZE*4]={0}; // Noise buffer for s_t_1_noisy
   short tmp[FRAME_SIZE] = {0};
   float speech_gain=1;
   float old_speech_gain = 1;
@@ -308,20 +306,20 @@ int main(int argc, char **argv) {
     //   todo: Where dose the magic number 2821 come from ...?
     if (training && ++gain_change_count > 2821) {
 
-      /* SpecAug */
-      rand_resp(a_sig, b_sig); // ~U[-0.375, +0.375]
+      /* ✅ `a_sig` & `b_sig` - SpecAug's 2nd-order feedback/forward params ~U[-0.375, +0.375] */
+      rand_resp(a_sig, b_sig);
 
-      /* Gain */
+      /* ✅ `speech_gain` - Gain factor at frame end */
       speech_gain = pow(10., (-20+(rand()%40))/20.);
       if (rand()%20==0) speech_gain *= .01;
       if (rand()%100==0) speech_gain = 0;
 
-      /* Noise (s_t_1_noisy) */
+      /* `noise_std` - Noise for s_t_1_noisy */
       float tmp1 = (float)rand()/RAND_MAX; // ~ U[0, 1]
       float tmp2 = (float)rand()/RAND_MAX; // ~ U[0, 1]
       noise_std = ABS16(-1.5*log(1e-4 + tmp1) - .5*log(1e-4 + tmp2));
 
-      /* Reset parameter change count */
+      /* ✅ Reset parameter change count */
       gain_change_count = 0;
     }
 
@@ -334,13 +332,13 @@ int main(int argc, char **argv) {
     //   c.f. Eq.7 of Valin, et al. (2017). *A Hybrid DSP/Deep Learning Approach to Real-Time Full-Band Speech Enhancement*. arxiv:1709.08243
     // High-pass filter...? (a_hp=[-1.99599, 0.99600], b_hp=[-2, 1]) (seems to come from original RNNoise...?)
     biquad(x, mem_hp_x, x, b_hp, a_hp, FRAME_SIZE);
-    // Random spectral augmentation
+    // ✅ Random spectral augmentation
     biquad(x, mem_resp_x, x, b_sig, a_sig, FRAME_SIZE);
 
-    /* Preemphasis */
+    /* ✅ Preemphasis - Preemphasize a frame `x` (len==FRAME_SIZE) with coeff `PREEMPHASIS` in place */
     preemphasis(x, &mem_preemph, x, PREEMPHASIS, FRAME_SIZE);
 
-    /* Gain */
+    /* ✅ Gain - Sample-wise gain with smooth gain transition */
     for (i=0;i<FRAME_SIZE;i++) {
       float g; // gain of a sample
       float f = (float)i/FRAME_SIZE; // ratio in a frame
@@ -349,14 +347,23 @@ int main(int argc, char **argv) {
       x[i] *= g;
     }
 
-    /* Noise addition */
-    // ~ U[-0.5, +0.5]
+    /* ✅ Noise addition - Sample-wise noise addition ~ U[-0.5, +0.5] */
     // todo: It looks strange. x will be used for clean target, so does it make output noisy...?
     for (i=0;i<FRAME_SIZE;i++) x[i] += rand()/(float)RAND_MAX - .5;
     /* ================================================================================================== */
 
 
-    /* PCM is delayed by 1/2 frame to make the features centered on the frames. */
+    /* PCM is shifted to make the features centered on the frames. */
+    /*
+                       t                     t+F-ost       t+F
+       augumented x  --|------------------------------------|
+                       |__________________________|
+                                         ⤵
+                                (t)                     (t+F-ost)
+                                 |__________________________|
+      s_frame_clean    |------------------------------------|
+                    (t-ost)     (t)
+    */
     for (i=0;i<FRAME_SIZE-TRAINING_OFFSET;i++) s_frame_clean[i+TRAINING_OFFSET] = float2short(x[i]);
 
 
@@ -364,7 +371,7 @@ int main(int argc, char **argv) {
     // Generate features
 
     /* Feature extraction */
-    // Calculate parts of `.features` and store them in `st`
+    // Calculate parts of `.features` (bfcc & lpcoeff) from non-shifted s_t_clean (x) and store them in `st`
     compute_frame_features(st, x);
 
     /* Data stock */
@@ -372,7 +379,7 @@ int main(int argc, char **argv) {
     // Stack a frame into the buffer for 4 frame grouped processing mode
     RNN_COPY(&s_4frames_clean[frame_start], s_frame_clean, FRAME_SIZE);
 
-    /* Noise generation for noisy sample augmentation */
+    /* Noise generation for noisy sample augmentation (s_t_1_noisy) */
     if (fpcm) { // `if (fpcm)` check for non-train mode
         compute_noise(&noisebuf[frame_start], noise_std);
     }
@@ -383,7 +390,8 @@ int main(int argc, char **argv) {
       // Calculate remaining `.features` (pitches) and Dump full `.features` into the `ffeat` file
       process_single_frame(st, ffeat);
 
-      /* Sample series generation and Dump */
+      /* Sample series (s_t_1_noisy & s_t_clean) augmentation and Dump */
+      //                                                                     singleFrame
       if (fpcm) write_audio(st, s_frame_clean, &noisebuf[frame_start], fpcm, 1);
     }
     st->pcount++;
@@ -405,9 +413,19 @@ int main(int argc, char **argv) {
     /* ================================================================================================== */
 
 
+    /* Shift remainings
+                       t                     t+F-ost       t+F
+       augumented x  --|------------------------------------|--
+                                                  |_________|
+                                  ←___________________/
+                   (t+F-ost)  (t+F)
+                       |________|
+      s_frame_clean    |------------------------------------|
+                                 (t)                    (t+F-ost)
+    */
     for (i=0;i<TRAINING_OFFSET;i++) s_frame_clean[i] = float2short(x[i+FRAME_SIZE-TRAINING_OFFSET]);
 
-    /* Gain trainsition */
+    /* ✅ Gain - Gain factor at next frame start */
     old_speech_gain = speech_gain;
 
     // Increment the number of processed frames

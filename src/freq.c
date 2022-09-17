@@ -42,7 +42,10 @@
 #define SQUARE(x) ((x)*(x))
 
 static const opus_int16 eband5ms[] = {
-/*0  200 400 600 800  1k 1.2 1.4 1.6  2k 2.4 2.8 3.2  4k 4.8 5.6 6.8  8k*/
+/*
+              Δ+0.2                    Δ+0.4         Δ+0.8     Δ+1.2
+|________________________________|_______________|___________|_______|
+0.0 0.2 0.4 0.6 0.8 1.0 1.2 1.4 1.6 2.0 2.4 2.8 3.2 4.0 4.8 5.6 6.8 8.0 [k] */
   0,  1,  2,  3,  4,  5,  6,  7,  8, 10, 12, 14, 16, 20, 24, 28, 34, 40
 };
 
@@ -103,25 +106,33 @@ int          p
 
 
 
+/**
+ * (Maybe) Linear-frequency Complex spectrum -> Berk-frequency Power spectrum
+ */
 void compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
   int i;
   float sum[NB_BANDS] = {0};
   for (i=0;i<NB_BANDS-1;i++)
   {
+    // i-th band
     int j;
     int band_size;
+    // e.g. eband5ms[9]-eband5ms[8] == 10 - 8
     band_size = (eband5ms[i+1]-eband5ms[i])*WINDOW_SIZE_5MS;
     for (j=0;j<band_size;j++) {
       float tmp;
       float frac = (float)j/band_size;
       tmp = SQUARE(X[(eband5ms[i]*WINDOW_SIZE_5MS) + j].r);
-      tmp += SQUARE(X[(eband5ms[i]*WINDOW_SIZE_5MS) + j].i);
+      tmp += SQUARE(X[(eband5ms[i]*WINDOW_SIZE_5MS) + j].i); // r**2 + i**2
       sum[i] += (1-frac)*tmp;
       sum[i+1] += frac*tmp;
     }
   }
+  // Double head and tail
   sum[0] *= 2;
   sum[NB_BANDS-1] *= 2;
+
+  // Write out all band energies
   for (i=0;i<NB_BANDS;i++)
   {
     bandE[i] = sum[i];

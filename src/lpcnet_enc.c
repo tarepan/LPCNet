@@ -479,13 +479,30 @@ LPCNET_EXPORT void lpcnet_encoder_destroy(LPCNetEncState *st) {
   free(st);
 }
 
+/*
+Args:
+  st - State over loop?
+  X  - Output for FFT?
+  Ex - Output for Berk-Band Energy?
+  in - Input waveform?
+*/
 static void frame_analysis(LPCNetEncState *st, kiss_fft_cpx *X, float *Ex, const float *in) {
+  /* [Read]
+
+  x  --|--------------------------------------------|--  
+       |______|_________________________________|?
+       overlap              frame
+  */
   float x[WINDOW_SIZE];
   RNN_COPY(x, st->analysis_mem, OVERLAP_SIZE);
   RNN_COPY(&x[OVERLAP_SIZE], in, FRAME_SIZE);
   RNN_COPY(st->analysis_mem, &in[FRAME_SIZE-OVERLAP_SIZE], OVERLAP_SIZE);
+
+  // Transforms
   apply_window(x);
+  // FFT
   forward_transform(X, x);
+  // complexSpectrum-to-BerkPowerSpectrum (?)
   compute_band_energy(Ex, X);
 }
 
@@ -502,18 +519,28 @@ void compute_frame_features(LPCNetEncState *st, const float *in) {
   int sub;
   float ener;
   RNN_COPY(aligned_in, &st->analysis_mem[OVERLAP_SIZE-TRAINING_OFFSET], TRAINING_OFFSET);
+
+  // wave -> FFT & Berk-energy
   frame_analysis(st, X, Ex, in);
-  logMax = -2;
+
+  // energy -> log(energy) with range adjustment
+  logMax = -2; // Container of biggest Ly[i] value
   follow = -2;
   for (i=0;i<NB_BANDS;i++) {
-    Ly[i] = log10(1e-2+Ex[i]);
-    Ly[i] = MAX16(logMax-8, MAX16(follow-2.5, Ly[i]));
+    Ly[i] = log10(1e-2+Ex[i]); // log(power)
+    Ly[i] = MAX16(logMax-8, MAX16(follow-2.5, Ly[i])); // e.g. Ly[0] = Max(-10, -4.5, log(power))
+    // state update (used only here)
     logMax = MAX16(logMax, Ly[i]);
     follow = MAX16(follow-2.5, Ly[i]);
+    // not used...?
     E += Ex[i];
   }
+
+  // spc-to-cep (berk-frequency log-power spectrum -> Berk-Frequency Cepstrum)
   dct(st->features[st->pcount], Ly);
   st->features[st->pcount][0] -= 4;
+
+  // BFC-to-LPCoeff
   lpc_from_cepstrum(st->lpc, st->features[st->pcount]);
 
   // Update LP coefficients in `features`
@@ -562,11 +589,6 @@ void compute_frame_features(LPCNetEncState *st, const float *in) {
     //     st->xc[2+2*st->pcount+sub][i] = interpolated[i];
     //   }
     // }
-#if 0
-    for (i=0;i<PITCH_MAX_PERIOD;i++)
-      printf("%f ", st->xc[2*st->pcount+sub][i]);
-    printf("\n");
-#endif
   }
 }
 
@@ -881,6 +903,7 @@ void process_single_frame(LPCNetEncState *st, FILE *ffeat) {
 void preemphasis(float *y, float *mem, const float *x, float coef, int N) {
   int i;
   for (i=0;i<N;i++) {
+    // y_t = x_t - coeff * x_{t-1} = x[i] + mem
     float yi;
     yi = x[i] + *mem;
     *mem = -coef*x[i];
