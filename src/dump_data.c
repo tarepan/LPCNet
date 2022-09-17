@@ -151,11 +151,11 @@ void write_audio(LPCNetEncState *st, const short *s_t_clean, const int *noise, F
     //// Update s_t_x_noisy's {t-2} ~ {t-LPC_ORDER} (sig_mem[1:] = sig_mem[0:LPC_ORDER-1])
     RNN_MOVE(&st->sig_mem[1], &st->sig_mem[0], LPC_ORDER-1);
     //// Update t-1 (s_t_1_noisy)
-    st->sig_mem[0] = s_t_noisy;
-
-    // Append `s_t_1_s_t_series` into the file
-    fwrite(s_t_1_s_t_series, 4*FRAME_SIZE, 1, file);
+    st->sig_mem[0] = s_t_noisy_fp32;
   }
+
+  // Append `s_t_1_s_t_s16` into the file (2 [series] * 2[byte] * FRAME_SIZE [samples])
+  fwrite(s_t_1_s_t_s16, 4*FRAME_SIZE, 1, file);
 }
 
 
