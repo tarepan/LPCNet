@@ -60,7 +60,7 @@ struct LPCNetEncState{
   int last_period;
   float lpc[LPC_ORDER];
   float vq_mem[NB_BANDS];
-  float features[4][NB_TOTAL_FEATURES];
+  float features[4][NB_TOTAL_FEATURES];      // Feature of 4 frames (for supra-frame processing)
   float sig_mem[LPC_ORDER];                  // samples for Linear Prediction (signal_memory?)
 };
 

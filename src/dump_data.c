@@ -176,7 +176,6 @@ int main(int argc, char **argv) {
   FILE *ffeat;     // Output file containing              <features.f32>
   FILE *fpcm=NULL; // Output file containing              <data.s16>
   short s_frame_clean[FRAME_SIZE]={0}; // samples of a frame
-  short s_4frames_clean[FRAME_SIZE*4]={0};      // samples of 4 frames
   int noisebuf[FRAME_SIZE*4]={0}; // Noise buffer for s_t_1_noisy
   short tmp[FRAME_SIZE] = {0};
   float speech_gain=1;
@@ -365,36 +364,19 @@ int main(int argc, char **argv) {
 
 
     /* ==== Feature-nize ================================================================================ */
-    // Generate features
 
-    /* Feature extraction */
-    // Calculate parts of `.features` (bfcc & lpcoeff) from non-shifted s_t_clean (x) and store them in `st`
+    /* Feature extraction - Calculate parts of `.features` (bfcc & lpcoeff) from non-shifted s_t_clean (x) and store them in `st` */
     compute_frame_features(st, x);
-
-    /* Data stock */
-    int frame_start = st->pcount*FRAME_SIZE;
-    // Stack a frame into the buffer for 4 frame grouped processing mode
-    RNN_COPY(&s_4frames_clean[frame_start], s_frame_clean, FRAME_SIZE);
-
-    /* Noise generation for noisy sample augmentation (s_t_1_noisy) */
-    if (fpcm) { // `if (fpcm)` check for non-train mode
-        compute_noise(&noisebuf[frame_start], noise_std);
-    }
-
-    /* Pitch generation and Dump */
-    // Calculate remaining `.features` (pitches) and Dump full `.features` into the `ffeat` file
+    /* Pitch generation and Dump - Calculate remaining `.features` (pitches) and Dump full `.features` into the `ffeat` file */
     process_single_frame(st, ffeat);
 
-    /* Sample series (s_t_1_noisy & s_t_clean) augmentation and Dump */
-    if (fpcm) write_audio(st, s_frame_clean, &noisebuf[frame_start], fpcm);
-
-    /* 4 frame counting */
-    st->pcount++;
-    if (st->pcount == 4) {
-      st->pcount = 0;
+    /* Sample series (s_t_1_noisy & s_t_clean) augmentation with noise and Dump for training */
+    if (fpcm) {
+      compute_noise(&noisebuf[0], noise_std);
+      write_audio(st, s_frame_clean, &noisebuf[0], fpcm);
     }
-    /* ================================================================================================== */
 
+    /* ================================================================================================== */
 
     /* Shift remainings
                        t                     t+F-ost       t+F
@@ -413,6 +395,12 @@ int main(int argc, char **argv) {
 
     // Increment the number of processed frames
     count++;
+
+    /* frame counting for supra-frame processings */
+    st->pcount++;
+    if (st->pcount == 4) {
+      st->pcount = 0;
+    }
   }
 
   /* Termination */
