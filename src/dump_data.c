@@ -67,7 +67,7 @@ static void biquad(float *y, float mem[2], const float *x, const float *b, const
 }
 
 /**
- * Sampling from U[-0.5, +0.5]
+ * ✅ Sampling from U[-0.5, +0.5]
  */
 static float uni_rand() {
   // [0, RAND_MAX] -> [0, 1] -> [-0.5, +0.5]
@@ -95,7 +95,7 @@ void compute_noise(int *noise, float noise_std) {
 }
 
 /**
- * Cast fp32 to int16
+ * ✅ Cast fp32 to int16
  */
 static short float2short(float x)
 {
@@ -106,46 +106,45 @@ static short float2short(float x)
 
 
 /**
- * Write two sample series (s_t_1_noisy & s_t_clean) to the file.
+ * ✅ Write two sample series (s_t_1_noisy & s_t_clean_s16) to the file.
  * 
  * Args:
- *   st        - State containing 'LP coefficients' and 'samples over loop'
- *   s_t_clean - Sample t series (waveform) without noise
- *   noise     - Noise series for s_t_1_noisy argumentation
- *   file      - Output file pointer
+ *   st            - State containing 'LP coefficients' and 'samples over loop'
+ *   s_t_clean_s16 - Sample t series (signed int16 waveform) without noise
+ *   noise         - Noise series for s_t_1_noisy argumentation
+ *   file          - Output file pointer
  */
-void write_audio(LPCNetEncState *st, const short *s_t_clean, const int *noise, FILE *file) {
-  int OFFSET_COEFF = NB_BANDS + 2; // BFCC+pitches
+void write_audio(LPCNetEncState *st, const short *s_t_clean_s16, const int *noise, FILE *file) {
 
-  // series of s_{t-1} (lagged/delayed) & s_t, linearlized
-  short s_t_1_s_t_series[2*FRAME_SIZE];
+  // series of s_{t-1}_noisy (lagged/delayed) & s_t_clean, linearlized, signed int16
+  short s_t_1_s_t_s16[2*FRAME_SIZE];
 
   int t;
   for (t=0; t<FRAME_SIZE; t++) {
     /* Process a sample t in the frame */
 
-    float p_t_noisy = 0; // Prediction, noise added
+    float p_t_noisy_fp32 = 0; // Prediction, noise added
 
     /* Linear Prediction - prediction from noisy samples */
     //                                                             a_{j+1} * s_{t-(j+1)}_noisy
-    int j;
-    for (j=0;j<LPC_ORDER;j++) p_t_noisy -= st->features[0][j+OFFSET_COEFF] * st->sig_mem[j];
+    int j; //                                                    BFCC+pitches
+    for (j=0;j<LPC_ORDER;j++) p_t_noisy_fp32 -= st->features[0][j+NB_BANDS+2] * st->sig_mem[j];
 
     /* Ideal LP Residual - Ideal residual inference under erroneous (noisy) previous samples */
-    float e_t_ideal = lin2ulaw(s_t_clean[t] - p_t_noisy);
+    float e_t_ideal_fp32 = lin2ulaw(s_t_clean_s16[t] - p_t_noisy_fp32);
 
     /* Sample t=T-1 (lagged/delayed) with noise */
-    float s_t_1_noisy = st->sig_mem[0];
-    s_t_1_s_t_series[2*t] = float2short(s_t_1_noisy);
+    float s_t_1_noisy_fp32 = st->sig_mem[0];
+    s_t_1_s_t_s16[2*t] = float2short(s_t_1_noisy_fp32);
 
-    /* Sample t=T without noise */
-    s_t_1_s_t_series[2*t+1] = s_t_clean[t];
+    /* Copy s_t_clean_s16[t] */
+    s_t_1_s_t_s16[2*t+1] = s_t_clean_s16[t];
 
     /* Noise addition - Emulate the situation 'Try to yield ideal e_t under erroneous samples, but has some error in the e_t' */
     // Derivatives: Noise source at residual (at sample @original -> at residual from @b858ea9)
-    float e_t_noisy = e_t_ideal + noise[t];
+    float e_t_noisy = e_t_ideal_fp32 + noise[t];
     e_t_noisy = IMIN(255, IMAX(0, e_t_noisy));
-    float s_t_noisy = p_t_noisy + ulaw2lin(e_t_noisy);
+    float s_t_noisy_fp32 = p_t_noisy_fp32 + ulaw2lin(e_t_noisy);
 
     /* State update over loop */
     //// Update s_t_x_noisy's {t-2} ~ {t-LPC_ORDER} (sig_mem[1:] = sig_mem[0:LPC_ORDER-1])
@@ -162,7 +161,7 @@ void write_audio(LPCNetEncState *st, const short *s_t_clean, const int *noise, F
 int main(int argc, char **argv) {
   int i;
   char *argv0;
-  int count=0;
+  int frame_count=0;
   static const float a_hp[2] = {-1.99599, 0.99600};
   static const float b_hp[2] = {-2, 1};
   float a_sig[2] = {0};
@@ -175,8 +174,7 @@ int main(int argc, char **argv) {
   FILE *f1;        // Input  file containing sample series (waveform) <input.s16>
   FILE *ffeat;     // Output file containing              <features.f32>
   FILE *fpcm=NULL; // Output file containing              <data.s16>
-  short s_frame_clean[FRAME_SIZE]={0}; // samples of a frame
-  int noisebuf[FRAME_SIZE*4]={0}; // Noise buffer for s_t_1_noisy
+  short s_t_clean_s16[FRAME_SIZE]={0}; // samples of a frame, signed int16
   short tmp[FRAME_SIZE] = {0};
   float speech_gain=1;
   float old_speech_gain = 1;
@@ -188,6 +186,7 @@ int main(int argc, char **argv) {
   int encode = 0;
   int decode = 0;
   int quantize = 0;
+
   srand(getpid());
   st = lpcnet_encoder_create();
   argv0=argv[0];
@@ -234,31 +233,14 @@ int main(int argc, char **argv) {
     fprintf(stderr,"Error opening input .s16 16kHz speech input file: %s\n", argv[2]);
     exit(1);
   }
-  //// output file for ... <features.f32>
+  //// output file for Feature series <features.f32>
   ffeat = fopen(argv[3], "wb");
   if (ffeat == NULL) {
     fprintf(stderr,"Error opening output feature file: %s\n", argv[3]);
     exit(1);
   }
-  if (decode) {
-    float vq_mem[NB_BANDS] = {0};
-    while (1) {
-      int ret;
-      unsigned char buf[8];
-      float features[4][NB_TOTAL_FEATURES];
-      /*int c0_id, main_pitch, modulation, corr_id, vq_end[3], vq_mid, interp_id;*/
-      /*ret = fscanf(f1, "%d %d %d %d %d %d %d %d %d\n", &c0_id, &main_pitch, &modulation, &corr_id, &vq_end[0], &vq_end[1], &vq_end[2], &vq_mid, &interp_id);*/
-      ret = fread(buf, 1, 8, f1);
-      if (ret != 8) break;
-      decode_packet(features, vq_mem, buf);
-      for (i=0;i<4;i++) {
-        fwrite(features[i], sizeof(float), NB_TOTAL_FEATURES, ffeat);
-      }
-    }
-    return 0;
-  }
+  //// output file for Waveforms <data.s16>
   if (training) {
-    //// output file for ... <data.s16>
     fpcm = fopen(argv[4], "wb");
     if (fpcm == NULL) {
       fprintf(stderr,"Error opening output PCM file: %s\n", argv[4]);
@@ -267,10 +249,12 @@ int main(int argc, char **argv) {
   }
 
   while (1) {
-    // Loop single frame processing
+    // Frame-wise preprocessing
 
     size_t ret;
 
+
+    /* ==== Data Load =================================================================================== */
     // Read samples of single frame from <input.s16> on `x`
     ////         len(x)               `tmp` is initialized with 0
     for (i=0;i<FRAME_SIZE;i++) x[i] = tmp[i]; // implicit cast?
@@ -290,14 +274,14 @@ int main(int argc, char **argv) {
       one_pass_completed = 1;
     }
 
-    // Silent clipping (disabled @5627af3)
 
-    /* Loop escape */
+    /* ==== Loop escape ================================================================================= */
     // For too small data, loop more than 2 passes
-    // if        enough_data           && >=1_pass_completed
-    if (count*FRAME_SIZE_5MS>=10000000 && one_pass_completed) break;
+    // if             enough_data            && >=1_pass_completed
+    if (frame_count*FRAME_SIZE_5MS>=10000000 && one_pass_completed) break;
 
-    /* Parameter generation */
+
+    /* ==== Parameter generation ======================================================================== */
     //   Updated once per 2821 frames
     //   todo: Where dose the magic number 2821 come from ...?
     if (training && ++gain_change_count > 2821) {
@@ -346,9 +330,9 @@ int main(int argc, char **argv) {
     /* ✅ Noise addition - Sample-wise noise addition ~ U[-0.5, +0.5] */
     // todo: It looks strange. x will be used for clean target, so does it make output noisy...?
     for (i=0;i<FRAME_SIZE;i++) x[i] += rand()/(float)RAND_MAX - .5;
-    /* ================================================================================================== */
 
 
+    /* ==== ✅ Shift ==================================================================================== */
     /* PCM is shifted to make the features centered on the frames. */
     /*
                        t                     t+F-ost       t+F
@@ -357,27 +341,28 @@ int main(int argc, char **argv) {
                                          ⤵
                                 (t)                     (t+F-ost)
                                  |__________________________|
-      s_frame_clean    |------------------------------------|
+      s_t_clean_s16    |------------------------------------|
                     (t-ost)     (t)
     */
-    for (i=0;i<FRAME_SIZE-TRAINING_OFFSET;i++) s_frame_clean[i+TRAINING_OFFSET] = float2short(x[i]);
+    for (i=0;i<FRAME_SIZE-TRAINING_OFFSET;i++) s_t_clean_s16[i+TRAINING_OFFSET] = float2short(x[i]);
 
 
     /* ==== Feature-nize ================================================================================ */
 
-    /* Feature extraction - Calculate parts of `.features` (bfcc & lpcoeff) from non-shifted s_t_clean (x) and store them in `st` */
+    /* Feature extraction - Calculate parts of `.features` (bfcc & lpcoeff) from non-shifted sample series (x) and store them in `st` */
     compute_frame_features(st, x);
     /* Pitch generation and Dump - Calculate remaining `.features` (pitches) and Dump full `.features` into the `ffeat` file */
     process_single_frame(st, ffeat);
 
     /* Sample series (s_t_1_noisy & s_t_clean) augmentation with noise and Dump for training */
     if (fpcm) {
+      int noisebuf[FRAME_SIZE]={0};
       compute_noise(&noisebuf[0], noise_std);
-      write_audio(st, s_frame_clean, &noisebuf[0], fpcm);
+      write_audio(st, s_t_clean_s16, &noisebuf[0], fpcm);
     }
 
-    /* ================================================================================================== */
 
+    /* ==== ✅ Shift =================================================================================== */
     /* Shift remainings
                        t                     t+F-ost       t+F
        augumented x  --|------------------------------------|--
@@ -385,22 +370,27 @@ int main(int argc, char **argv) {
                                   ←___________________/
                    (t+F-ost)  (t+F)
                        |________|
-      s_frame_clean    |------------------------------------|
+      s_t_clean_s16    |------------------------------------|
                                  (t)                    (t+F-ost)
     */
-    for (i=0;i<TRAINING_OFFSET;i++) s_frame_clean[i] = float2short(x[i+FRAME_SIZE-TRAINING_OFFSET]);
+    for (i=0;i<TRAINING_OFFSET;i++) s_t_clean_s16[i] = float2short(x[i+FRAME_SIZE-TRAINING_OFFSET]);
 
-    /* ✅ Gain - Gain factor at next frame start */
+
+    /* ==== ✅ State updates =========================================================================== */
+
+    /* Gain - Gain factor at next frame start */
     old_speech_gain = speech_gain;
 
-    // Increment the number of processed frames
-    count++;
+    // Frame Count - Increment the number of processed frames
+    frame_count++;
 
-    /* frame counting for supra-frame processings */
+    /* Frame Count - Increment frame counting for supra-frame processings */
     st->pcount++;
     if (st->pcount == 4) {
       st->pcount = 0;
     }
+    /* ================================================================================================== */
+    /* ================================================================================================== */
   }
 
   /* Termination */

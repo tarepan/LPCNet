@@ -559,13 +559,12 @@ void compute_frame_features(LPCNetEncState *st, const float *in) {
     st->pitch_filt = sum;
     /*printf("%f\n", st->exc_buf[PITCH_MAX_PERIOD+i]);*/
   }
-  /* Cross-correlation on half-frames. */
+  /* Cross-correlation on half-frames (sub?) */
   for (sub=0;sub<2;sub++) {
     int off = sub*FRAME_SIZE/2;
     celt_pitch_xcorr(&st->exc_buf[PITCH_MAX_PERIOD+off], st->exc_buf+off, xcorr, FRAME_SIZE/2, PITCH_MAX_PERIOD);
     ener0 = celt_inner_prod(&st->exc_buf[PITCH_MAX_PERIOD+off], &st->exc_buf[PITCH_MAX_PERIOD+off], FRAME_SIZE/2);
     st->frame_weight[2+2*st->pcount+sub] = ener0;
-    /*printf("%f\n", st->frame_weight[2+2*st->pcount+sub]);*/
     for (i=0;i<PITCH_MAX_PERIOD;i++) {
       ener = (1 + ener0 + celt_inner_prod(&st->exc_buf[i+off], &st->exc_buf[i+off], FRAME_SIZE/2));
       st->xc[2+2*st->pcount+sub][i] = 2*xcorr[i] / ener;
@@ -823,7 +822,7 @@ void process_multi_frame(LPCNetEncState *st, FILE *ffeat) {
  */
 void process_single_frame(LPCNetEncState *st, FILE *ffeat) {
   int i;
-  int sub;
+  int sub; // sub-frame...? {0|1}
   int best_i;
   int best[4];
   int pitch_prev[2][PITCH_MAX_PERIOD];
@@ -835,11 +834,19 @@ void process_single_frame(LPCNetEncState *st, FILE *ffeat) {
   for(sub=0;sub<2;sub++) {
     float max_path_all = -1e15;
     best_i = 0;
-    // `.xc`
+
+    // Update `.xc`
     for (i=0;i<PITCH_MAX_PERIOD-2*PITCH_MIN_PERIOD;i++) {
+      /* xc_half = MAX16 of
+        - st->xc[2+2*st->pcount+sub][(PITCH_MAX_PERIOD+i  )/2]
+        - st->xc[2+2*st->pcount+sub][(PITCH_MAX_PERIOD+i+2)/2]
+        - st->xc[2+2*st->pcount+sub][(PITCH_MAX_PERIOD+i-1)/2]
+      */
       float xc_half = MAX16(MAX16(st->xc[2+2*st->pcount+sub][(PITCH_MAX_PERIOD+i)/2], st->xc[2+2*st->pcount+sub][(PITCH_MAX_PERIOD+i+2)/2]), st->xc[2+2*st->pcount+sub][(PITCH_MAX_PERIOD+i-1)/2]);
+      // Update `st->xc` if ... is True
       if (st->xc[2+2*st->pcount+sub][i] < xc_half*1.1) st->xc[2+2*st->pcount+sub][i] *= .8;
     }
+
     for (i=0;i<PITCH_MAX_PERIOD-PITCH_MIN_PERIOD;i++) {
       int j;
       float max_prev;
@@ -851,7 +858,7 @@ void process_single_frame(LPCNetEncState *st, FILE *ffeat) {
           pitch_prev[sub][i] = i+j;
         }
       }
-      st->pitch_max_path[1][i] = max_prev + st->frame_weight[2+2*st->pcount+sub]*st->xc[2+2*st->pcount+sub][i];
+      st->pitch_max_path[1][i] = max_prev + st->frame_weight[2+2*st->pcount+sub] * st->xc[2+2*st->pcount+sub][i];
       if (st->pitch_max_path[1][i] > max_path_all) {
         max_path_all = st->pitch_max_path[1][i];
         best_i = i;
@@ -859,12 +866,12 @@ void process_single_frame(LPCNetEncState *st, FILE *ffeat) {
     }
     /* Renormalize. */
     for (i=0;i<PITCH_MAX_PERIOD-PITCH_MIN_PERIOD;i++) st->pitch_max_path[1][i] -= max_path_all;
-    /*for (i=0;i<PITCH_MAX_PERIOD-PITCH_MIN_PERIOD;i++) printf("%f ", st->pitch_max_path[1][i]);
-    printf("\n");*/
     RNN_COPY(&st->pitch_max_path[0][0], &st->pitch_max_path[1][0], PITCH_MAX_PERIOD);
     st->pitch_max_path_all = max_path_all;
     st->best_i = best_i;
   }
+
+  // Frame correlation?
   // `.best_i`
   best_i = st->best_i;
   frame_corr = 0;
@@ -879,7 +886,7 @@ void process_single_frame(LPCNetEncState *st, FILE *ffeat) {
 
   // Update Pitches in `features`
   // [0:NB_BANDS] - BFCC, [NB_BANDS:NB_BANDS+1] - Pitch Period, [NB_BANDS+1:NB_BANDS+2] - Pitch Correlation, [NB_BANDS+2:] - LP coefficients
-  // PitchPeriod ∈ [6.6, 31.0]       .01*(IMAX(66, IMIN(510, best[2]+best[3])) - 200); 
+  // PitchPeriod ∈ [6.6, 31.0]
   st->features[st->pcount][NB_BANDS] = .01*(IMAX(66, IMIN(510, best[2]+best[3]))-200);
   st->features[st->pcount][NB_BANDS + 1] = frame_corr-.5;
 
