@@ -61,6 +61,159 @@ typedef struct {
 } CommonState;
 
 
+/**
+ * (Maybe) Linear-frequency Complex spectrum -> Berk-frequency Power spectrum
+ */
+void compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
+  int i;
+  float sum[NB_BANDS] = {0};
+  for (i=0;i<NB_BANDS-1;i++)
+  {
+    // i-th band
+    int j;
+    int band_size;
+    // e.g. eband5ms[9]-eband5ms[8] == 10 - 8
+    band_size = (eband5ms[i+1]-eband5ms[i])*WINDOW_SIZE_5MS;
+    for (j=0;j<band_size;j++) {
+      float tmp;
+      float frac = (float)j/band_size;
+      tmp = SQUARE(X[(eband5ms[i]*WINDOW_SIZE_5MS) + j].r);
+      tmp += SQUARE(X[(eband5ms[i]*WINDOW_SIZE_5MS) + j].i); // r**2 + i**2
+      sum[i] += (1-frac)*tmp;
+      sum[i+1] += frac*tmp;
+    }
+  }
+  // Double head and tail
+  sum[0] *= 2;
+  sum[NB_BANDS-1] *= 2;
+
+  // Write out all band energies
+  for (i=0;i<NB_BANDS;i++)
+  {
+    bandE[i] = sum[i];
+  }
+}
+
+void interp_band_gain(float *g, const float *bandE) {
+  int i;
+  memset(g, 0, FREQ_SIZE);
+  for (i=0;i<NB_BANDS-1;i++)
+  {
+    int j;
+    int band_size;
+    band_size = (eband5ms[i+1]-eband5ms[i])*WINDOW_SIZE_5MS;
+    for (j=0;j<band_size;j++) {
+      float frac = (float)j/band_size;
+      g[(eband5ms[i]*WINDOW_SIZE_5MS) + j] = (1-frac)*bandE[i] + frac*bandE[i+1];
+    }
+  }
+}
+
+// ==== Frequency Analysis Initialization =============================================
+CommonState common;
+
+/**
+ * Initialize Frequency Analyzers if not init.
+ */
+static void check_init(void) {
+  int i;
+
+  // Once initialized, never reset
+  if (common.init) return;
+
+  // Init
+  //// ? fft?
+  common.kfft = opus_fft_alloc_twiddles(WINDOW_SIZE, NULL, NULL, NULL, 0);
+  //// Window
+  for (i=0;i<OVERLAP_SIZE;i++)
+    common.half_window[i] = sin(.5*M_PI*sin(.5*M_PI*(i+.5)/OVERLAP_SIZE) * sin(.5*M_PI*(i+.5)/OVERLAP_SIZE));
+  //// DCT table
+  for (i=0;i<NB_BANDS;i++) {
+    int j;
+    for (j=0;j<NB_BANDS;j++) {
+      common.dct_table[i*NB_BANDS + j] = cos((i+.5)*j*M_PI/NB_BANDS);
+      if (j==0) common.dct_table[i*NB_BANDS + j] *= sqrt(.5);
+    }
+  }
+  common.init = 1;
+}
+// ====================================================================================
+
+
+// ==== Discrete Cosine Transform =====================================================
+void dct(float *out, const float *in) {
+  int i;
+  check_init();
+
+  // <vec_x, vec_cos_i>: Simple looping Dot product
+  for (i=0;i<NB_BANDS;i++) {
+    int j;
+    float sum = 0;
+    for (j=0;j<NB_BANDS;j++) {
+      sum += in[j] * common.dct_table[j*NB_BANDS + i];
+    }
+    out[i] = sum*sqrt(2./NB_BANDS);
+  }
+}
+
+void idct(float *out, const float *in) {
+  int i;
+  check_init();
+
+  // vec_f * vec_cos_t: Simple looping multiplication
+  for (i=0;i<NB_BANDS;i++) {
+    int j;
+    float sum = 0;
+    for (j=0;j<NB_BANDS;j++) {
+      sum += in[j] * common.dct_table[i*NB_BANDS + j];
+    }
+    out[i] = sum*sqrt(2./NB_BANDS);
+  }
+}
+// ====================================================================================
+
+
+// ==== Discrete Fourier Transform ====================================================
+void forward_transform(kiss_fft_cpx *out, const float *in) {
+  int i;
+  kiss_fft_cpx x[WINDOW_SIZE];
+  kiss_fft_cpx y[WINDOW_SIZE];
+  check_init();
+
+  for (i=0;i<WINDOW_SIZE;i++) {
+    x[i].r = in[i];
+    x[i].i = 0;
+  }
+  opus_fft(common.kfft, x, y, 0);
+  for (i=0;i<FREQ_SIZE;i++) {
+    out[i] = y[i];
+  }
+}
+
+void inverse_transform(float *out, const kiss_fft_cpx *in) {
+  int i;
+  kiss_fft_cpx x[WINDOW_SIZE];
+  kiss_fft_cpx y[WINDOW_SIZE];
+  check_init();
+
+  for (i=0;i<FREQ_SIZE;i++) {
+    x[i] = in[i];
+  }
+  for (;i<WINDOW_SIZE;i++) {
+    x[i].r = x[WINDOW_SIZE - i].r;
+    x[i].i = -x[WINDOW_SIZE - i].i;
+  }
+  opus_fft(common.kfft, x, y, 0);
+  /* output in reverse order for IFFT. */
+  out[0] = WINDOW_SIZE*y[0].r;
+  for (i=1;i<WINDOW_SIZE;i++) {
+    out[i] = WINDOW_SIZE*y[WINDOW_SIZE - i].r;
+  }
+}
+// ====================================================================================
+
+
+// ==== Linear Prediction Coefficients ================================================
 float _lpcnet_lpc(
       opus_val16 *lpc, /* out: [0...p-1] LPC coefficients      */
       opus_val16 *rc,
@@ -104,160 +257,6 @@ int          p
    return error;
 }
 
-
-
-/**
- * (Maybe) Linear-frequency Complex spectrum -> Berk-frequency Power spectrum
- */
-void compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
-  int i;
-  float sum[NB_BANDS] = {0};
-  for (i=0;i<NB_BANDS-1;i++)
-  {
-    // i-th band
-    int j;
-    int band_size;
-    // e.g. eband5ms[9]-eband5ms[8] == 10 - 8
-    band_size = (eband5ms[i+1]-eband5ms[i])*WINDOW_SIZE_5MS;
-    for (j=0;j<band_size;j++) {
-      float tmp;
-      float frac = (float)j/band_size;
-      tmp = SQUARE(X[(eband5ms[i]*WINDOW_SIZE_5MS) + j].r);
-      tmp += SQUARE(X[(eband5ms[i]*WINDOW_SIZE_5MS) + j].i); // r**2 + i**2
-      sum[i] += (1-frac)*tmp;
-      sum[i+1] += frac*tmp;
-    }
-  }
-  // Double head and tail
-  sum[0] *= 2;
-  sum[NB_BANDS-1] *= 2;
-
-  // Write out all band energies
-  for (i=0;i<NB_BANDS;i++)
-  {
-    bandE[i] = sum[i];
-  }
-}
-
-void compute_band_corr(float *bandE, const kiss_fft_cpx *X, const kiss_fft_cpx *P) {
-  int i;
-  float sum[NB_BANDS] = {0};
-  for (i=0;i<NB_BANDS-1;i++)
-  {
-    int j;
-    int band_size;
-    band_size = (eband5ms[i+1]-eband5ms[i])*WINDOW_SIZE_5MS;
-    for (j=0;j<band_size;j++) {
-      float tmp;
-      float frac = (float)j/band_size;
-      tmp = X[(eband5ms[i]*WINDOW_SIZE_5MS) + j].r * P[(eband5ms[i]*WINDOW_SIZE_5MS) + j].r;
-      tmp += X[(eband5ms[i]*WINDOW_SIZE_5MS) + j].i * P[(eband5ms[i]*WINDOW_SIZE_5MS) + j].i;
-      sum[i] += (1-frac)*tmp;
-      sum[i+1] += frac*tmp;
-    }
-  }
-  sum[0] *= 2;
-  sum[NB_BANDS-1] *= 2;
-  for (i=0;i<NB_BANDS;i++)
-  {
-    bandE[i] = sum[i];
-  }
-}
-
-void interp_band_gain(float *g, const float *bandE) {
-  int i;
-  memset(g, 0, FREQ_SIZE);
-  for (i=0;i<NB_BANDS-1;i++)
-  {
-    int j;
-    int band_size;
-    band_size = (eband5ms[i+1]-eband5ms[i])*WINDOW_SIZE_5MS;
-    for (j=0;j<band_size;j++) {
-      float frac = (float)j/band_size;
-      g[(eband5ms[i]*WINDOW_SIZE_5MS) + j] = (1-frac)*bandE[i] + frac*bandE[i+1];
-    }
-  }
-}
-
-CommonState common;
-
-static void check_init(void) {
-  int i;
-  if (common.init) return;
-  common.kfft = opus_fft_alloc_twiddles(WINDOW_SIZE, NULL, NULL, NULL, 0);
-  for (i=0;i<OVERLAP_SIZE;i++)
-    common.half_window[i] = sin(.5*M_PI*sin(.5*M_PI*(i+.5)/OVERLAP_SIZE) * sin(.5*M_PI*(i+.5)/OVERLAP_SIZE));
-  for (i=0;i<NB_BANDS;i++) {
-    int j;
-    for (j=0;j<NB_BANDS;j++) {
-      common.dct_table[i*NB_BANDS + j] = cos((i+.5)*j*M_PI/NB_BANDS);
-      if (j==0) common.dct_table[i*NB_BANDS + j] *= sqrt(.5);
-    }
-  }
-  common.init = 1;
-}
-
-void dct(float *out, const float *in) {
-  int i;
-  check_init();
-  for (i=0;i<NB_BANDS;i++) {
-    int j;
-    float sum = 0;
-    for (j=0;j<NB_BANDS;j++) {
-      sum += in[j] * common.dct_table[j*NB_BANDS + i];
-    }
-    out[i] = sum*sqrt(2./NB_BANDS);
-  }
-}
-
-void idct(float *out, const float *in) {
-  int i;
-  check_init();
-  for (i=0;i<NB_BANDS;i++) {
-    int j;
-    float sum = 0;
-    for (j=0;j<NB_BANDS;j++) {
-      sum += in[j] * common.dct_table[i*NB_BANDS + j];
-    }
-    out[i] = sum*sqrt(2./NB_BANDS);
-  }
-}
-
-void forward_transform(kiss_fft_cpx *out, const float *in) {
-  int i;
-  kiss_fft_cpx x[WINDOW_SIZE];
-  kiss_fft_cpx y[WINDOW_SIZE];
-  check_init();
-  for (i=0;i<WINDOW_SIZE;i++) {
-    x[i].r = in[i];
-    x[i].i = 0;
-  }
-  opus_fft(common.kfft, x, y, 0);
-  for (i=0;i<FREQ_SIZE;i++) {
-    out[i] = y[i];
-  }
-}
-
-void inverse_transform(float *out, const kiss_fft_cpx *in) {
-  int i;
-  kiss_fft_cpx x[WINDOW_SIZE];
-  kiss_fft_cpx y[WINDOW_SIZE];
-  check_init();
-  for (i=0;i<FREQ_SIZE;i++) {
-    x[i] = in[i];
-  }
-  for (;i<WINDOW_SIZE;i++) {
-    x[i].r = x[WINDOW_SIZE - i].r;
-    x[i].i = -x[WINDOW_SIZE - i].i;
-  }
-  opus_fft(common.kfft, x, y, 0);
-  /* output in reverse order for IFFT. */
-  out[0] = WINDOW_SIZE*y[0].r;
-  for (i=1;i<WINDOW_SIZE;i++) {
-    out[i] = WINDOW_SIZE*y[WINDOW_SIZE - i].r;
-  }
-}
-
 float lpc_from_bands(float *lpc, const float *Ex)
 {
    int i;
@@ -267,6 +266,7 @@ float lpc_from_bands(float *lpc, const float *Ex)
    float Xr[FREQ_SIZE];
    kiss_fft_cpx X_auto[FREQ_SIZE];
    float x_auto[WINDOW_SIZE];
+
    interp_band_gain(Xr, Ex);
    Xr[FREQ_SIZE-1] = 0;
    RNN_CLEAR(X_auto, FREQ_SIZE);
@@ -288,18 +288,28 @@ float lpc_from_cepstrum(float *lpc, const float *cepstrum)
    float Ex[NB_BANDS];
    float tmp[NB_BANDS];
    RNN_COPY(tmp, cepstrum, NB_BANDS);
+
+   // Ceps-to-Bands
    tmp[0] += 4;
    idct(Ex, tmp);
    for (i=0;i<NB_BANDS;i++) Ex[i] = pow(10.f, Ex[i])*compensation[i];
+
+   // Bands-to-LPCoeff
    return lpc_from_bands(lpc, Ex);
 }
+// ====================================================================================
 
+
+// ==== Window ========================================================================
 void apply_window(float *x) {
   int i;
   check_init();
+
+  // Same coefficient on both side (?)
   for (i=0;i<OVERLAP_SIZE;i++) {
     x[i] *= common.half_window[i];
     x[WINDOW_SIZE - 1 - i] *= common.half_window[i];
   }
 }
+// ====================================================================================
 

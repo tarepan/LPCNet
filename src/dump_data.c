@@ -60,7 +60,7 @@ static void biquad(float *y, float mem[2], const float *x, const float *b, const
     float xi, yi; // Input and Output
     xi = x[i];
     yi = x[i] + mem[0];
-    mem[0] = mem[1] + (b[0]*(double)xi - a[0]*(double)yi); // (b_1 * x_{i-2} - a_1 * x_{i-2}) + (b_0 * x_{i-1} - a_0 * y_{i-1})
+    mem[0] = mem[1] + (b[0]*(double)xi - a[0]*(double)yi); // (b_1 * x_{i-2} - a_1 * y_{i-2}) + (b_0 * x_{i-1} - a_0 * y_{i-1})
     mem[1] = (b[1]*(double)xi - a[1]*(double)yi);
     y[i] = yi;
   }
@@ -84,7 +84,7 @@ static void rand_resp(float *a, float *b) {
   b[1] = .75*uni_rand();
 }
 
-/* Compute noise for s_t_1_noisy */
+/* △ Compute noise for s_t_1_noisy */
 void compute_noise(int *noise, float noise_std) {
   int i;
   for (i=0;i<FRAME_SIZE;i++) {
@@ -94,13 +94,17 @@ void compute_noise(int *noise, float noise_std) {
   }
 }
 
+/*
+    noise[i] = short(std/√2 * (lnU[0,1] - lnU[0,1]))
+*/
+
 /**
  * ✅ Cast fp32 to int16
  */
-static short float2short(float x)
+static short float2short(float x_fp32)
 {
   int i;
-  i = (int)floor(.5+x);
+  i = (int)floor(.5+x_fp32);
   return IMAX(-32767, IMIN(32767, i));
 }
 
@@ -169,13 +173,13 @@ int main(int argc, char **argv) {
   float mem_hp_x[2]={0};
   float mem_resp_x[2]={0};
   float mem_preemph=0;       // preemphasis memory over frames
-  float x[FRAME_SIZE];       // samples of a frame
+  float x_fp32[FRAME_SIZE];  // samples of a frame. Basically, [-2**15, +2**15]
   int gain_change_count=0;
   FILE *f1;        // Input  file containing sample series (waveform) <input.s16>
   FILE *ffeat;     // Output file containing              <features.f32>
   FILE *fpcm=NULL; // Output file containing              <data.s16>
   short s_t_clean_s16[FRAME_SIZE]={0}; // samples of a frame, signed int16
-  short tmp[FRAME_SIZE] = {0};
+  short tmp_s16[FRAME_SIZE] = {0};
   float speech_gain=1;
   float old_speech_gain = 1;
   int one_pass_completed = 0;
@@ -255,17 +259,17 @@ int main(int argc, char **argv) {
 
 
     /* ==== Data Load =================================================================================== */
-    // Read samples of single frame from <input.s16> on `x`
-    ////         len(x)               `tmp` is initialized with 0
-    for (i=0;i<FRAME_SIZE;i++) x[i] = tmp[i]; // implicit cast?
+    // Read samples of single frame from <input.s16> on `x_fp32`
+    ////         len(x_fp32)               `tmp_s16` is initialized with 0
+    for (i=0;i<FRAME_SIZE;i++) x_fp32[i] = tmp_s16[i]; // implicit cast?
 
-    // Load Int16 samples of a frame from <input.s16> onto `tmp` for next loop...?
-    ret = fread(tmp, sizeof(short), FRAME_SIZE, f1);
+    // Load Int16 samples of a frame from <input.s16> onto `tmp_s16` for next loop...?
+    ret = fread(tmp_s16, sizeof(short), FRAME_SIZE, f1);
     if (feof(f1) || ret != FRAME_SIZE) {
       if (!training) break;
       // N-th pass from frame#0
       rewind(f1);
-      ret = fread(tmp, sizeof(short), FRAME_SIZE, f1);
+      ret = fread(tmp_s16, sizeof(short), FRAME_SIZE, f1);
       if (ret != FRAME_SIZE) {
         // Even first frame do not have enough length, something wrong.
         fprintf(stderr, "error reading\n");
@@ -294,7 +298,7 @@ int main(int argc, char **argv) {
       if (rand()%20==0) speech_gain *= .01;
       if (rand()%100==0) speech_gain = 0;
 
-      /* `noise_std` - Noise for s_t_1_noisy */
+      /* △ `noise_std` - Noise for s_t_1_noisy */
       float tmp1 = (float)rand()/RAND_MAX; // ~ U[0, 1]
       float tmp2 = (float)rand()/RAND_MAX; // ~ U[0, 1]
       noise_std = ABS16(-1.5*log(1e-4 + tmp1) - .5*log(1e-4 + tmp2));
@@ -305,18 +309,17 @@ int main(int argc, char **argv) {
 
 
     /* ==== Augmentation ================================================================================ */
-    // Augment `x`, samples of a frame, by "SpecAug -> Preemphasis -> Gain -> NoiseAddition"
+    // Augment `x_fp32`, samples of a frame, by "Equalizer -> Preemphasis -> Gain -> NoiseAddition" in place.
 
-    /* SpecAug */
+    /* SpecAug - biquad Equalizers */
     // Derivatives: Random spectral augmentation (OFF @original -> ON @efficiency from @396274f)
-    //   c.f. Eq.7 of Valin, et al. (2017). *A Hybrid DSP/Deep Learning Approach to Real-Time Full-Band Speech Enhancement*. arxiv:1709.08243
-    // High-pass filter...? (a_hp=[-1.99599, 0.99600], b_hp=[-2, 1]) (seems to come from original RNNoise...?)
-    biquad(x, mem_hp_x, x, b_hp, a_hp, FRAME_SIZE);
-    // ✅ Random spectral augmentation
-    biquad(x, mem_resp_x, x, b_sig, a_sig, FRAME_SIZE);
+    // ✅ Fixed High-pass filter
+    biquad(x_fp32, mem_hp_x,   x_fp32, b_hp,   a_hp, FRAME_SIZE);
+    // ✅ Random equalizer
+    biquad(x_fp32, mem_resp_x, x_fp32, b_sig, a_sig, FRAME_SIZE);
 
-    /* ✅ Preemphasis - Preemphasize a frame `x` (len==FRAME_SIZE) with coeff `PREEMPHASIS` in place */
-    preemphasis(x, &mem_preemph, x, PREEMPHASIS, FRAME_SIZE);
+    /* ✅ Preemphasis - Preemphasize with coeff PREEMPHASIS==0.85 */
+    preemphasis(x_fp32, &mem_preemph, x_fp32, PREEMPHASIS, FRAME_SIZE);
 
     /* ✅ Gain - Sample-wise gain with smooth gain transition */
     for (i=0;i<FRAME_SIZE;i++) {
@@ -324,12 +327,14 @@ int main(int argc, char **argv) {
       float f = (float)i/FRAME_SIZE; // ratio in a frame
       // Gain smoothing
       g = f*speech_gain + (1-f)*old_speech_gain;
-      x[i] *= g;
+      x_fp32[i] *= g;
     }
 
-    /* ✅ Noise addition - Sample-wise noise addition ~ U[-0.5, +0.5] */
+    /* △ Noise addition - Sample-wise noise addition ~ U[-0.5, +0.5] */
     // todo: It looks strange. x will be used for clean target, so does it make output noisy...?
-    for (i=0;i<FRAME_SIZE;i++) x[i] += rand()/(float)RAND_MAX - .5;
+    //       But `x_fp32` is basically [-2**15, +2**15], so effect is super tiny. what's for ...?
+    //       Aliasing something ...?
+    for (i=0;i<FRAME_SIZE;i++) x_fp32[i] += rand()/(float)RAND_MAX - .5;
 
 
     /* ==== ✅ Shift ==================================================================================== */
@@ -344,17 +349,17 @@ int main(int argc, char **argv) {
       s_t_clean_s16    |------------------------------------|
                     (t-ost)     (t)
     */
-    for (i=0;i<FRAME_SIZE-TRAINING_OFFSET;i++) s_t_clean_s16[i+TRAINING_OFFSET] = float2short(x[i]);
+    for (i=0;i<FRAME_SIZE-TRAINING_OFFSET;i++) s_t_clean_s16[i+TRAINING_OFFSET] = float2short(x_fp32[i]);
 
 
     /* ==== Feature-nize ================================================================================ */
 
     /* Feature extraction - Calculate parts of `.features` (bfcc & lpcoeff) from non-shifted sample series (x) and store them in `st` */
-    compute_frame_features(st, x);
+    compute_frame_features(st, x_fp32);
     /* Pitch generation and Dump - Calculate remaining `.features` (pitches) and Dump full `.features` into the `ffeat` file */
     process_single_frame(st, ffeat);
 
-    /* Sample series (s_t_1_noisy & s_t_clean) augmentation with noise and Dump for training */
+    /* △ Sample series (s_t_1_noisy & s_t_clean) augmentation with noise and Dump for training */
     if (fpcm) {
       int noisebuf[FRAME_SIZE]={0};
       compute_noise(&noisebuf[0], noise_std);
@@ -373,7 +378,7 @@ int main(int argc, char **argv) {
       s_t_clean_s16    |------------------------------------|
                                  (t)                    (t+F-ost)
     */
-    for (i=0;i<TRAINING_OFFSET;i++) s_t_clean_s16[i] = float2short(x[i+FRAME_SIZE-TRAINING_OFFSET]);
+    for (i=0;i<TRAINING_OFFSET;i++) s_t_clean_s16[i] = float2short(x_fp32[i+FRAME_SIZE-TRAINING_OFFSET]);
 
 
     /* ==== ✅ State updates =========================================================================== */

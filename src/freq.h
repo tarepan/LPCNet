@@ -46,7 +46,6 @@
 #define NB_BANDS_1 (NB_BANDS - 1)
 
 void compute_band_energy(float *bandE, const kiss_fft_cpx *X);
-void compute_band_corr(float *bandE, const kiss_fft_cpx *X, const kiss_fft_cpx *P);
 
 void apply_window(float *x);
 void dct(float *out, const float *in);

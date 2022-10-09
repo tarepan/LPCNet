@@ -30,6 +30,7 @@ static RNN_INLINE float log2_approx(float x)
    return 1+integer+frac;
 }
 
+/*           ln(x) = ln(2) * log2(x) */
 #define log_approx(x) (0.69315f*log2_approx(x))
 
 static RNN_INLINE float ulaw2lin(float u)
