@@ -117,8 +117,10 @@ void run_frame_network(LPCNetState *lpcnet, float *gru_a_condition, float *gru_b
 #elif FEATURES_DELAY>0    
     memcpy(lpc, lpcnet->old_lpc[FEATURES_DELAY-1], LPC_ORDER*sizeof(lpc[0]));
     memmove(lpcnet->old_lpc[1], lpcnet->old_lpc[0], (FEATURES_DELAY-1)*LPC_ORDER*sizeof(lpc[0]));
+    // BFC-to-LPCoeff
     lpc_from_cepstrum(lpcnet->old_lpc[0], features);
 #else
+    // BFC-to-LPCoeff
     lpc_from_cepstrum(lpc, features);
 #endif
     if (lpcnet->frame_count < 1000) lpcnet->frame_count++;

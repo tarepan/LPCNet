@@ -478,30 +478,50 @@ LPCNET_EXPORT void lpcnet_encoder_destroy(LPCNetEncState *st) {
   free(st);
 }
 
-/*
-Args:
-  st - State over loop?
-  X  - Output for FFT?
-  Ex - Output for Berk-Band Energy?
-  in - Input waveform?
-*/
+/**
+ * Frame samples to Bark-frequency Linear Power Spectrum.
+ *
+ * Transforms: OverlappedSamples -> (Windowing) -> (rFFT) -> (Filter bank) -> BarkLinPowSpc
+ *
+ * Args:
+ *  st - State for over-loop overlap
+ *  X  - Local FFT Memory (not used in outter)
+ *  Ex - Output for Bark-frequency Linear Power Spectrum
+ *  in - Input waveform
+ */
 static void frame_analysis(LPCNetEncState *st, kiss_fft_cpx *X, float *Ex, const float *in) {
-  /* [Read]
 
-  x  --|--------------------------------------------|--  
-       |______|_________________________________|?
-       overlap              frame
+  /* Data move */
+  /*
+                                      OVERLAP_SIZE --------.
+                                     |____________|        |
+  `in` ................|--------------------------|..      |
+                       |__________________________|        |
+                               FRAME_SIZE                  |
+                                    ↓                      |
+  `x`    |-------------'--------------------------|        |
+          WINDOW_SIZE == OVERLAP_SIZE + FRAME_SIZE         |
+                ↑                                          |
+  mem    |------------|                                    |
+         |____________|   <--------------------------------`
+          OVERLAP_SIZE       update after use
+
   */
   float x[WINDOW_SIZE];
+  //// Load (all) overlap samples
   RNN_COPY(x, st->analysis_mem, OVERLAP_SIZE);
+  //// Append new samples to overlap samples
   RNN_COPY(&x[OVERLAP_SIZE], in, FRAME_SIZE);
+  //// Copy next overlap into memory (`analysis_mem`)
   RNN_COPY(st->analysis_mem, &in[FRAME_SIZE-OVERLAP_SIZE], OVERLAP_SIZE);
 
-  // Transforms
+  /* Windowing */
   apply_window(x);
-  // FFT
+
+  /* wave-to-LinFreqComplexSpc */
   forward_transform(X, x);
-  // complexSpectrum-to-BerkPowerSpectrum (?)
+
+  /* LinFreqComplexSpc-to-BarkLinPowSpc */
   compute_band_energy(Ex, X);
 }
 
@@ -523,14 +543,18 @@ void compute_frame_features(LPCNetEncState *st, const float *in) {
   float ener;
   RNN_COPY(aligned_in, &st->analysis_mem[OVERLAP_SIZE-TRAINING_OFFSET], TRAINING_OFFSET);
 
-  // wave (`in`) -> FFT (`X`) & Berk-energy (`Ex`)
+  /* samples-to-BarkLinPowSpc */
   frame_analysis(st, X, Ex, in);
 
-  // energy (`Ex`) -> log_energy (`Ly`) with range adjustment
-  logMax = -2; // Container of biggest Ly[i] value
-  follow = -2;
+  /* BarkLinPowSpc -> BarkLogPowSpc (`Ly`) with range adjustment */
+  logMax = -2; // biggest Ly[i] value
+  follow = -2; // gradual value change ...? 
   for (i=0;i<NB_BANDS;i++) {
+    // BarkLinPowSpc -> BarkLogPowSpc
     Ly[i] = log10(1e-2+Ex[i]); // log(power)
+    // Range Adjustment
+    //   logMax - Never too small compared to biggest previous components
+    //   follow - Never too small compared to one-step previous components
     Ly[i] = MAX16(logMax-8, MAX16(follow-2.5, Ly[i])); // e.g. Ly[0] = Max(-10, -4.5, log(power))
     // state update (used only here)
     logMax = MAX16(logMax, Ly[i]);
@@ -539,17 +563,18 @@ void compute_frame_features(LPCNetEncState *st, const float *in) {
     E += Ex[i];
   }
 
-  // spc-to-cep (berk-frequency log-power spectrum (`Ly`) -> Berk-Frequency Cepstrum (`st->features`))
+  /* BarkLogPowSpc-to-BFC, then update BFC in state */
   dct(st->features[st->pcount], Ly);
+  //// attenuate BFC[0] (DC components) ...?
   st->features[st->pcount][0] -= 4;
 
-  // BFC-to-LPCoeff
+  /* BFC-to-LPCoeff */
   lpc_from_cepstrum(st->lpc, st->features[st->pcount]);
 
-  // Update LP coefficients in `features`
-  // [0:NB_BANDS] - BFCC, [NB_BANDS:NB_BANDS+1] - Pitch Period, [NB_BANDS+1:NB_BANDS+2] - Pitch Correlation, [NB_BANDS+2:] - LP coefficients
+  /* Update LPCoeff in state */
   for (i=0;i<LPC_ORDER;i++) st->features[st->pcount][NB_BANDS+2+i] = st->lpc[i];
 
+  // ?
   RNN_MOVE(st->exc_buf, &st->exc_buf[FRAME_SIZE], PITCH_MAX_PERIOD);
   RNN_COPY(&aligned_in[TRAINING_OFFSET], in, FRAME_SIZE-TRAINING_OFFSET);
   for (i=0;i<FRAME_SIZE;i++) {

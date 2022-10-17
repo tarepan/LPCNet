@@ -62,7 +62,11 @@ typedef struct {
 
 
 /**
- * (Maybe) Linear-frequency Complex spectrum -> Berk-frequency Power spectrum
+ * LinFreqComplexSpc-to-BarkLinPowSpc
+ *
+ * Args:
+ *   bandE - Output Bark-frequency   Linear Power Spectrum
+ *   X     - Input  Linear-frequency Complex      Spectrum
  */
 void compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
   int i;
@@ -75,15 +79,14 @@ void compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
     // e.g. eband5ms[9]-eband5ms[8] == 10 - 8
     band_size = (eband5ms[i+1]-eband5ms[i])*WINDOW_SIZE_5MS;
     for (j=0;j<band_size;j++) {
-      float tmp;
       float frac = (float)j/band_size;
-      tmp = SQUARE(X[(eband5ms[i]*WINDOW_SIZE_5MS) + j].r);
-      tmp += SQUARE(X[(eband5ms[i]*WINDOW_SIZE_5MS) + j].i); // r**2 + i**2
-      sum[i] += (1-frac)*tmp;
-      sum[i+1] += frac*tmp;
+      // power = F(~)**2 = r**2 + i**2
+      float power = SQUARE(X[(eband5ms[i]*WINDOW_SIZE_5MS) + j].r) + SQUARE(X[(eband5ms[i]*WINDOW_SIZE_5MS) + j].i);
+      sum[i]   += (1-frac) * power;
+      sum[i+1] +=   frac   * power;
     }
   }
-  // Double head and tail
+  // Double head and tail (because of half filterBank?)
   sum[0] *= 2;
   sum[NB_BANDS-1] *= 2;
 
@@ -94,11 +97,18 @@ void compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
   }
 }
 
+/**
+ * BarkLinPowSpc-to-LinFreqLinPowSpc
+ * Args:
+ *   g     - Interpolated Linear-frequency Linear Power Spectrum
+ *   bandE - BarkLinPowSpc [0:NB_BANDS]
+ */
 void interp_band_gain(float *g, const float *bandE) {
   int i;
   memset(g, 0, FREQ_SIZE);
   for (i=0;i<NB_BANDS-1;i++)
   {
+    // Linearly interpolate a band
     int j;
     int band_size;
     band_size = (eband5ms[i+1]-eband5ms[i])*WINDOW_SIZE_5MS;
@@ -118,15 +128,26 @@ CommonState common;
 static void check_init(void) {
   int i;
 
-  // Once initialized, never reset
+  /* Init Check - Once initialized, never reset */
   if (common.init) return;
 
-  // Init
+  /* Initialization */
   //// ? fft?
   common.kfft = opus_fft_alloc_twiddles(WINDOW_SIZE, NULL, NULL, NULL, 0);
+
   //// Window
   for (i=0;i<OVERLAP_SIZE;i++)
     common.half_window[i] = sin(.5*M_PI*sin(.5*M_PI*(i+.5)/OVERLAP_SIZE) * sin(.5*M_PI*(i+.5)/OVERLAP_SIZE));
+  /*
+    sin(
+      .5 * M_PI
+      *
+      sin(.5*M_PI*(i+.5)/OVERLAP_SIZE)
+      *
+      sin(.5*M_PI*(i+.5)/OVERLAP_SIZE)
+    )
+  */
+
   //// DCT table
   for (i=0;i<NB_BANDS;i++) {
     int j;
@@ -174,17 +195,29 @@ void idct(float *out, const float *in) {
 
 
 // ==== Discrete Fourier Transform ====================================================
+/**
+ * wave-to-LinFreqComplexSpc by Fourier Transform.
+ *
+ * Args:
+ *   out - complex spectrum (only rFT part)
+ *   in  - Sample series after windowing
+ */
 void forward_transform(kiss_fft_cpx *out, const float *in) {
   int i;
-  kiss_fft_cpx x[WINDOW_SIZE];
+  kiss_fft_cpx x[WINDOW_SIZE]; // all samples
   kiss_fft_cpx y[WINDOW_SIZE];
   check_init();
 
+  /* Cast: Real-to-Complex */
   for (i=0;i<WINDOW_SIZE;i++) {
     x[i].r = in[i];
     x[i].i = 0;
   }
+
+  /* FT: complex FFT with opus implementation */
   opus_fft(common.kfft, x, y, 0);
+
+  /* Write: only rFFT part */
   for (i=0;i<FREQ_SIZE;i++) {
     out[i] = y[i];
   }
@@ -257,6 +290,13 @@ int          p
    return error;
 }
 
+/**
+ * BarkLinPowSpc-to-LPCoeff.
+ *
+ * Args:
+ *   lpc - Output LP coefficients
+ *   Ex  - Input  BarkLinPowSpc
+ */
 float lpc_from_bands(float *lpc, const float *Ex)
 {
    int i;
@@ -267,8 +307,11 @@ float lpc_from_bands(float *lpc, const float *Ex)
    kiss_fft_cpx X_auto[FREQ_SIZE];
    float x_auto[WINDOW_SIZE];
 
+   /* BarkLinPowSpc-to-PSD (LinFreqLinPowSpc) */
    interp_band_gain(Xr, Ex);
    Xr[FREQ_SIZE-1] = 0;
+
+   /* PSD-to-AC (lag 0 ~ LPC_ORDER) */
    RNN_CLEAR(X_auto, FREQ_SIZE);
    for (i=0;i<FREQ_SIZE;i++) X_auto[i].r = Xr[i];
    inverse_transform(x_auto, X_auto);
@@ -282,6 +325,12 @@ float lpc_from_bands(float *lpc, const float *Ex)
    return e;
 }
 
+/**
+ * BFC-to-LPCoeff.
+ *
+ * Args:
+ *   cepstrum - Bark-frequency Cepstrum (== dct of BarkLogPowSpc)
+ **/
 float lpc_from_cepstrum(float *lpc, const float *cepstrum)
 {
    int i;
@@ -289,25 +338,37 @@ float lpc_from_cepstrum(float *lpc, const float *cepstrum)
    float tmp[NB_BANDS];
    RNN_COPY(tmp, cepstrum, NB_BANDS);
 
-   // Ceps-to-Bands
+   /* BFC-to-Bands */
    tmp[0] += 4;
+   //// BFC-to-BarkLogPowSpc
    idct(Ex, tmp);
+   //// BarkLogPowSpc-to-BarkLinPowSpc (compensated...?)
    for (i=0;i<NB_BANDS;i++) Ex[i] = pow(10.f, Ex[i])*compensation[i];
 
-   // Bands-to-LPCoeff
+   // BarkLinPowSpc-to-LPCoeff
    return lpc_from_bands(lpc, Ex);
 }
 // ====================================================================================
 
 
 // ==== Window ========================================================================
+/**
+ * Apply window symmetrically.
+ */
 void apply_window(float *x) {
   int i;
   check_init();
 
-  // Same coefficient on both side (?)
+  /*
+          WINDOW_SIZE == OVERLAP_SIZE + FRAME_SIZE
+         |________________________________________|
+  `x`    |----------------------------------------|
+         |____________|              |____________|
+          OVERLAP_SIZE                OVERLAP_SIZE
+  */
+
   for (i=0;i<OVERLAP_SIZE;i++) {
-    x[i] *= common.half_window[i];
+    x[i]                   *= common.half_window[i];
     x[WINDOW_SIZE - 1 - i] *= common.half_window[i];
   }
 }
