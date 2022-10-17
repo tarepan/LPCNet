@@ -532,23 +532,22 @@ static void frame_analysis(LPCNetEncState *st, kiss_fft_cpx *X, float *Ex, const
 void compute_frame_features(LPCNetEncState *st, const float *in) {
   float aligned_in[FRAME_SIZE];
   int i;
-  float E = 0;
   float Ly[NB_BANDS];
-  float follow, logMax;
   kiss_fft_cpx X[FREQ_SIZE];
   float Ex[NB_BANDS];
   float xcorr[PITCH_MAX_PERIOD];
   float ener0;
   int sub;
   float ener;
+
   RNN_COPY(aligned_in, &st->analysis_mem[OVERLAP_SIZE-TRAINING_OFFSET], TRAINING_OFFSET);
 
   /* samples-to-BarkLinPowSpc */
   frame_analysis(st, X, Ex, in);
 
   /* BarkLinPowSpc -> BarkLogPowSpc (`Ly`) with range adjustment */
-  logMax = -2; // biggest Ly[i] value
-  follow = -2; // gradual value change ...? 
+  float logMax = -2; // biggest Ly[i] value
+  float follow = -2; // gradual value change ...? 
   for (i=0;i<NB_BANDS;i++) {
     // BarkLinPowSpc -> BarkLogPowSpc
     Ly[i] = log10(1e-2+Ex[i]); // log(power)
