@@ -559,8 +559,6 @@ void compute_frame_features(LPCNetEncState *st, const float *in) {
     // state update (used only here)
     logMax = MAX16(logMax, Ly[i]);
     follow = MAX16(follow-2.5, Ly[i]);
-    // not used...?
-    E += Ex[i];
   }
 
   /* BarkLogPowSpc-to-BFC, then update BFC in state */
