@@ -354,9 +354,9 @@ int main(int argc, char **argv) {
 
     /* ==== Feature-nize ================================================================================ */
 
-    /* Feature extraction - Calculate parts of `.features` (bfcc & lpcoeff) from non-shifted sample series (x) and store them in `st` */
+    /* Feature extraction - Calculate BFC and LPCoeff from non-shifted sample series (x) */
     compute_frame_features(st, x_fp32);
-    /* Pitch generation and Dump - Calculate remaining `.features` (pitches) and Dump full `.features` into the `ffeat` file */
+    /* Pitch generation and Dump - Calculate pitches and Dump full `.features` into the `ffeat` file */
     process_single_frame(st, ffeat);
 
     /* △ Sample series (s_t_1_noisy & s_t_clean) augmentation with noise and Dump for training */
